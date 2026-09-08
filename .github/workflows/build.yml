@@ -1,0 +1,20 @@
+name: Build Pico 2 W (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ns2pro:
+        description: Also build the separate NS2-only variant
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Validate unified receiver
+    uses: ./.github/workflows/build-firmware.yml
+    with:
+      version: ${{ github.sha }}
+      ns2pro: ${{ inputs.ns2pro }}

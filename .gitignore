@@ -1,0 +1,22 @@
+# Root project output only; do not hide files in imported vendor snapshots.
+/build/
+/build-*/
+/build_*/
+/artifacts/
+/dist/
+/.controllerbridge-pico2w-build/
+/.pico-sdk/
+/.vscode/
+/.idea/
+/CMakeUserPresets.json
+/compile_commands.json
+/*.uf2
+/*.elf
+/*.bin
+/*.map
+/*.zip
+/*.cbmodule
+/*.log
+/tools/*.uf2
+/tools/*.log
+/tools/__pycache__/

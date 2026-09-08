@@ -1,0 +1,137 @@
+name: Build Pico 2 W (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Firmware version string; empty uses dev
+        type: string
+        default: ""
+      ns2pro:
+        description: Also build the separate NS2-only variant
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Firmware version string; empty uses dev
+        type: string
+        default: ""
+      ns2pro:
+        description: Also build the separate NS2-only variant
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  PICO_SDK_REF: "2.2.0"
+  PICO_SDK_SHA: a1438dff1d38bd9c65dbd693f0e5db4b9ae91779
+  TINYUSB_REF: "0.20.0"
+  TINYUSB_SHA: 3af1bec1a9161ee8dec29487831f7ac7ade9e189
+  BTSTACK_SHA: 501e6d2b86e6c92bfb9c390bcf55709938e25ac1
+  CYW43_SHA: dd7568229f3bf7a37737b9e1ef250c26efe75b23
+  ARM_VER: "14.2.rel1"
+
+jobs:
+  build:
+    name: Unified receiver build check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout standalone source
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake python3 build-essential ninja-build curl xz-utils
+
+      - name: Prepare pinned SDK and ARM compiler
+        run: |
+          set -euo pipefail
+          sdk="$RUNNER_TEMP/pico-sdk"
+          archive="arm-gnu-toolchain-${ARM_VER}-x86_64-arm-none-eabi.tar.xz"
+          mkdir -p "$RUNNER_TEMP/arm-gnu-toolchain" artifacts/unified
+          curl --fail --location --retry 3 \
+            "https://developer.arm.com/-/media/Files/downloads/gnu/${ARM_VER}/binrel/${archive}" \
+            --output "$RUNNER_TEMP/$archive"
+          tar -xJf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/arm-gnu-toolchain" --strip-components=1
+          arm="$RUNNER_TEMP/arm-gnu-toolchain"
+          "$arm/bin/arm-none-eabi-gcc" --version | tee artifacts/unified/compiler-version.txt
+          grep -qi '14\.2\.Rel1' artifacts/unified/compiler-version.txt
+          sha256sum "$RUNNER_TEMP/$archive" | sed "s|$RUNNER_TEMP/||" > artifacts/unified/toolchain-archive.sha256
+          git clone --depth 1 --branch "$PICO_SDK_REF" https://github.com/raspberrypi/pico-sdk.git "$sdk"
+          git -C "$sdk" submodule update --init --recursive
+          git -C "$sdk/lib/tinyusb" fetch --depth 1 origin "refs/tags/${TINYUSB_REF}:refs/tags/${TINYUSB_REF}"
+          git -C "$sdk/lib/tinyusb" checkout --detach "$TINYUSB_SHA"
+          test "$(git -C "$sdk" rev-parse HEAD)" = "$PICO_SDK_SHA"
+          test "$(git -C "$sdk/lib/tinyusb" rev-parse HEAD)" = "$TINYUSB_SHA"
+          test "$(git -C "$sdk/lib/btstack" rev-parse HEAD)" = "$BTSTACK_SHA"
+          test "$(git -C "$sdk/lib/cyw43-driver" rev-parse HEAD)" = "$CYW43_SHA"
+          git -C "$sdk" submodule status --recursive > artifacts/unified/sdk-submodules.txt
+          printf 'PICO_SDK_PATH=%s\nPICO_TOOLCHAIN_PATH=%s\n' "$sdk" "$arm" >> "$GITHUB_ENV"
+          echo "$arm/bin" >> "$GITHUB_PATH"
+
+      - name: Build unified Pico 2 W receiver
+        env:
+          FW_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          cmake -S . -B build/unified -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCONTROLLERBRIDGE_USE_VSCODE_SDK=OFF \
+            -DPICO_SDK_PATH="$PICO_SDK_PATH" \
+            -DPICO_TOOLCHAIN_PATH="$PICO_TOOLCHAIN_PATH" \
+            -DPICO_BOARD=pico2_w -DPICO_W_BUILD=OFF \
+            -DENABLE_NS2PRO=OFF -DENABLE_AUTO_PROFILE=ON \
+            -DENABLE_SERIAL=OFF -DENABLE_VERBOSE=OFF -DENABLE_WAKE_HID=OFF \
+            -DVERSION="${FW_VERSION:-dev}"
+          cmake --build build/unified --target ds5-bridge --parallel 2
+          cp build/unified/ds5-bridge.uf2 artifacts/unified/controllerbridge-pico2w-unified.uf2
+          cp build/unified/CMakeCache.txt artifacts/unified/CMakeCache.txt
+          git rev-parse HEAD > artifacts/unified/source-commit.txt
+          cd artifacts/unified
+          sha256sum controllerbridge-pico2w-unified.uf2 > SHA256SUMS
+
+      - name: Build optional NS2-only receiver
+        if: inputs.ns2pro
+        env:
+          FW_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          cmake -S . -B build/ns2pro -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCONTROLLERBRIDGE_USE_VSCODE_SDK=OFF \
+            -DPICO_SDK_PATH="$PICO_SDK_PATH" \
+            -DPICO_TOOLCHAIN_PATH="$PICO_TOOLCHAIN_PATH" \
+            -DPICO_BOARD=pico2_w -DPICO_W_BUILD=OFF \
+            -DENABLE_NS2PRO=ON -DENABLE_AUTO_PROFILE=OFF \
+            -DENABLE_SERIAL=OFF -DENABLE_VERBOSE=OFF -DENABLE_WAKE_HID=OFF \
+            -DVERSION="${FW_VERSION:-dev}"
+          cmake --build build/ns2pro --target ds5-bridge --parallel 2
+          mkdir -p artifacts/ns2pro
+          cp build/ns2pro/ds5-bridge.uf2 artifacts/ns2pro/ns2pro-bridge-pico2w.uf2
+          cp build/ns2pro/CMakeCache.txt artifacts/ns2pro/CMakeCache.txt
+          cd artifacts/ns2pro
+          sha256sum ns2pro-bridge-pico2w.uf2 > SHA256SUMS
+
+      - name: Retain unified build evidence (not a release)
+        uses: actions/upload-artifact@v7
+        with:
+          name: pico2w-unified-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/unified/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Retain NS2-only build evidence (not a release)
+        if: inputs.ns2pro
+        uses: actions/upload-artifact@v7
+        with:
+          name: pico2w-ns2-only-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ns2pro/
+          if-no-files-found: error
+          retention-days: 14

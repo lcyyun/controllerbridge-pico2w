@@ -1,0 +1,980 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DS5 / NS2 Auto Bridge</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1016;
+      --panel: #171b24;
+      --panel-2: #202633;
+      --field: #0f131b;
+      --line: #303849;
+      --text: #edf2fb;
+      --muted: #9aa8bf;
+      --ok: #70d6a6;
+      --warn: #f0c66a;
+      --bad: #ff7d85;
+      --accent: #78dcca;
+      --accent-ink: #071210;
+      --blue: #80a8ff;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      letter-spacing: 0;
+    }
+
+    main {
+      width: min(1420px, calc(100vw - 28px));
+      margin: 0 auto;
+      padding: 18px 0 28px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    h1 { margin: 0; font-size: 24px; line-height: 1.2; }
+    h2 { margin: 0 0 10px; font-size: 15px; }
+    h3 { margin: 14px 0 8px; font-size: 13px; color: var(--muted); }
+
+    .subline { margin-top: 4px; color: var(--muted); font-size: 13px; }
+    .toolbar, .actions, .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .toolbar { justify-content: flex-end; }
+
+    button {
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 0 12px;
+      font: inherit;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    button:disabled { opacity: .42; cursor: not-allowed; }
+    .primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 750; }
+    .danger { border-color: rgba(255,125,133,.7); color: #ffdadd; }
+    .blue { border-color: rgba(128,168,255,.75); color: #dce6ff; }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .card, .panel {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .card { min-height: 78px; padding: 12px; }
+    .label { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; margin-bottom: 7px; }
+    .value { font-size: 19px; line-height: 1.2; font-weight: 750; overflow-wrap: anywhere; }
+    .value.small { font-size: 14px; line-height: 1.35; }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(360px, 430px) minmax(400px, 1fr) minmax(310px, 360px);
+      gap: 12px;
+      align-items: start;
+    }
+    .panel { padding: 13px; }
+
+    .form-grid {
+      display: grid;
+      gap: 8px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 145px minmax(0, 1fr) 76px;
+      gap: 10px;
+      align-items: center;
+      min-height: 40px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: rgba(255,255,255,.025);
+    }
+    .row.compact { grid-template-columns: 145px minmax(0, 1fr); }
+    .row label, .toggle label { font-size: 13px; color: var(--text); font-weight: 650; }
+    input[type="range"] { width: 100%; accent-color: var(--accent); }
+    input[type="number"], input[type="text"], select {
+      width: 100%;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--field);
+      color: var(--text);
+      padding: 0 9px;
+      font: inherit;
+    }
+    input[type="checkbox"] { width: 19px; height: 19px; accent-color: var(--accent); }
+    .toggle {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      min-height: 40px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: rgba(255,255,255,.025);
+    }
+
+    .kv {
+      display: grid;
+      grid-template-columns: 130px minmax(0, 1fr);
+      gap: 8px;
+      padding: 7px 0;
+      border-top: 1px solid rgba(255,255,255,.05);
+      font-size: 13px;
+    }
+    .kv:first-of-type { border-top: 0; }
+    .kv span:first-child { color: var(--muted); }
+    .kv span:last-child { overflow-wrap: anywhere; }
+
+    .sticks {
+      display: grid;
+      grid-template-columns: repeat(2, 112px) minmax(0, 1fr);
+      gap: 14px;
+      align-items: center;
+      margin: 8px 0 12px;
+    }
+    .stick {
+      width: 112px;
+      height: 112px;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      background:
+        linear-gradient(90deg, transparent 49%, rgba(120,220,202,.22) 50%, transparent 51%),
+        linear-gradient(0deg, transparent 49%, rgba(120,220,202,.22) 50%, transparent 51%),
+        #111722;
+      position: relative;
+    }
+    .dot {
+      position: absolute;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 16px rgba(120,220,202,.5);
+      left: 47px;
+      top: 47px;
+    }
+    .bar {
+      display: grid;
+      grid-template-columns: 54px minmax(0, 1fr) 52px;
+      gap: 8px;
+      align-items: center;
+      margin: 7px 0;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    meter { width: 100%; height: 10px; }
+
+    pre {
+      margin: 0;
+      height: 320px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #080b10;
+      padding: 10px;
+      color: #dce6f4;
+      font: 12px/1.45 Consolas, "Cascadia Mono", monospace;
+    }
+    .raw { height: 150px; margin-top: 10px; }
+
+    @media (max-width: 1160px) {
+      .layout { grid-template-columns: 1fr; }
+      .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      header { grid-template-columns: 1fr; }
+      .toolbar { justify-content: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>DS5 / NS2 Auto Bridge</h1>
+        <div id="deviceLine" class="subline">WebHID disconnected</div>
+      </div>
+      <div class="toolbar">
+        <button id="connectBtn" class="primary">连接 HID</button>
+        <button id="refreshBtn" disabled>读取</button>
+        <button id="disconnectBtn" disabled>断开</button>
+      </div>
+    </header>
+
+    <section class="cards">
+      <div class="card"><div class="label">USB 身份</div><div id="usbValue" class="value">-</div></div>
+      <div class="card"><div class="label">Profile</div><div id="profileValue" class="value">-</div></div>
+      <div class="card"><div class="label">锁定</div><div id="lockValue" class="value">-</div></div>
+      <div class="card"><div class="label">DS5</div><div id="ds5Value" class="value small">-</div></div>
+      <div class="card"><div class="label">NS2 BLE</div><div id="ns2Value" class="value small">-</div></div>
+      <div class="card"><div class="label">输入包</div><div id="inputValue" class="value small">-</div></div>
+    </section>
+
+    <section class="layout">
+      <div class="panel">
+        <h2>DS5Dongle 配置</h2>
+        <div class="kv"><span>设备</span><span id="ds5Device">-</span></div>
+        <div class="kv"><span>固件</span><span id="ds5Firmware">-</span></div>
+        <div class="kv"><span>RSSI</span><span id="ds5Rssi">-</span></div>
+        <div class="form-grid" style="margin-top:10px">
+          <div class="row">
+            <label for="ds5Haptics">触觉增益</label>
+            <input id="ds5Haptics" type="range" min="1" max="2" step="0.01" value="1">
+            <input id="ds5HapticsNum" type="number" min="1" max="2" step="0.01" value="1">
+          </div>
+          <div class="row">
+            <label for="ds5Speaker">扬声器音量 dB</label>
+            <input id="ds5Speaker" type="range" min="-100" max="0" step="1" value="-100">
+            <input id="ds5SpeakerNum" type="number" min="-100" max="0" step="1" value="-100">
+          </div>
+          <div class="row">
+            <label for="ds5Idle">闲置时间 分钟</label>
+            <input id="ds5Idle" type="range" min="5" max="60" step="1" value="30">
+            <input id="ds5IdleNum" type="number" min="5" max="60" step="1" value="30">
+          </div>
+          <div class="row">
+            <label for="ds5AudioBuffer">触觉缓冲长度</label>
+            <input id="ds5AudioBuffer" type="range" min="16" max="128" step="1" value="64">
+            <input id="ds5AudioBufferNum" type="number" min="16" max="128" step="1" value="64">
+          </div>
+          <div class="row compact">
+            <label for="ds5Polling">轮询率模式</label>
+            <select id="ds5Polling">
+              <option value="0">250 Hz</option>
+              <option value="1">500 Hz</option>
+              <option value="2">实时</option>
+            </select>
+          </div>
+          <div class="row compact">
+            <label for="ds5Controller">控制器模式</label>
+            <select id="ds5Controller">
+              <option value="0">DS5</option>
+              <option value="1">DSE</option>
+              <option value="2">自动</option>
+            </select>
+          </div>
+          <div class="toggle"><label for="ds5NoIdle">禁用闲置断连</label><input id="ds5NoIdle" type="checkbox"></div>
+          <div class="toggle"><label for="ds5NoLed">禁用 Pico LED</label><input id="ds5NoLed" type="checkbox"></div>
+        </div>
+        <div class="button-row" style="margin-top:12px">
+          <button id="ds5ApplyBtn" class="primary" disabled>应用 DS5</button>
+          <button id="ds5SaveBtn" class="blue" disabled>保存 Flash</button>
+          <button id="ds5ReconnectBtn" disabled>重连 USB</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>NS2Bridge 状态与调参</h2>
+        <div class="sticks">
+          <div>
+            <div class="stick"><div id="leftDot" class="dot"></div></div>
+            <div class="subline" id="leftStickText">左 2048, 2048</div>
+          </div>
+          <div>
+            <div class="stick"><div id="rightDot" class="dot"></div></div>
+            <div class="subline" id="rightStickText">右 2048, 2048</div>
+          </div>
+          <div>
+            <div class="bar"><span>ACC X</span><meter id="accX" min="-32768" max="32767" value="0"></meter><span id="accXText">0</span></div>
+            <div class="bar"><span>ACC Y</span><meter id="accY" min="-32768" max="32767" value="0"></meter><span id="accYText">0</span></div>
+            <div class="bar"><span>ACC Z</span><meter id="accZ" min="-32768" max="32767" value="0"></meter><span id="accZText">0</span></div>
+            <div class="bar"><span>GYR X</span><meter id="gyrX" min="-32768" max="32767" value="0"></meter><span id="gyrXText">0</span></div>
+            <div class="bar"><span>GYR Y</span><meter id="gyrY" min="-32768" max="32767" value="0"></meter><span id="gyrYText">0</span></div>
+            <div class="bar"><span>GYR Z</span><meter id="gyrZ" min="-32768" max="32767" value="0"></meter><span id="gyrZText">0</span></div>
+          </div>
+        </div>
+
+        <div class="form-grid">
+          <div class="row">
+            <label for="ns2Scale">震动强度 %</label>
+            <input id="ns2Scale" type="range" min="5" max="250" step="1" value="60">
+            <input id="ns2ScaleNum" type="number" min="5" max="250" step="1" value="60">
+          </div>
+          <div class="row">
+            <label for="ns2Hold">保持毫秒</label>
+            <input id="ns2Hold" type="range" min="20" max="3000" step="10" value="140">
+            <input id="ns2HoldNum" type="number" min="20" max="3000" step="10" value="140">
+          </div>
+          <div class="row">
+            <label for="ns2Tick">转发间隔 ms</label>
+            <input id="ns2Tick" type="range" min="5" max="100" step="1" value="30">
+            <input id="ns2TickNum" type="number" min="5" max="100" step="1" value="30">
+          </div>
+          <div class="row">
+            <label for="ns2Stops">停止包数量</label>
+            <input id="ns2Stops" type="range" min="1" max="12" step="1" value="3">
+            <input id="ns2StopsNum" type="number" min="1" max="12" step="1" value="3">
+          </div>
+          <div class="row">
+            <label for="ns2Rate">USB 回报率 Hz</label>
+            <input id="ns2Rate" type="range" min="60" max="1000" step="10" value="250">
+            <input id="ns2RateNum" type="number" min="60" max="1000" step="10" value="250">
+          </div>
+          <div class="toggle"><label for="ns2Raw">原始透传诊断</label><input id="ns2Raw" type="checkbox"></div>
+          <div class="toggle"><label for="ns2Parse">实时可视化解析</label><input id="ns2Parse" type="checkbox" checked></div>
+        </div>
+        <div class="button-row" style="margin-top:12px">
+          <button id="ns2ApplyBtn" class="primary" disabled>应用 NS2</button>
+          <button id="ns2SaveBtn" class="blue" disabled>保存 NS2</button>
+          <button id="rumbleOnBtn" disabled>开启震动</button>
+          <button id="rumbleOffBtn" disabled>关闭震动</button>
+          <button id="rumbleStopBtn" class="danger" disabled>停止</button>
+          <button id="ns2RecalibrateBtn" disabled>摇杆重校准</button>
+          <button data-test="left" disabled>测试左侧</button>
+          <button data-test="right" disabled>测试右侧</button>
+          <button data-test="both" disabled>测试双侧</button>
+          <button data-test="click" disabled>点击感</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>操作</h2>
+        <div class="actions">
+          <button id="resetBtn" disabled>重置识别</button>
+          <button id="pairBtn" disabled>NS2 配对</button>
+          <button id="scanBtn" disabled>NS2 扫描</button>
+          <button id="reconnectBtn" disabled>NS2 重连</button>
+          <button id="ns2DisconnectBtn" disabled>NS2 断开</button>
+          <button id="forgetBtn" class="danger" disabled>忘记 NS2</button>
+          <button id="bootromBtn" class="danger" disabled>BOOTSEL</button>
+        </div>
+        <h3>自动识别</h3>
+        <div class="kv"><span>Auto connect</span><span id="autoConnect">-</span></div>
+        <div class="kv"><span>Saved target</span><span id="savedTarget">-</span></div>
+        <div class="kv"><span>Connected addr</span><span id="connectedAddr">-</span></div>
+        <div class="kv"><span>Candidates</span><span id="candidates">-</span></div>
+        <div class="kv"><span>Notify</span><span id="notify">-</span></div>
+        <div class="kv"><span>DS5 raw/effective</span><span id="ds5Rate">-</span></div>
+        <div class="kv"><span>NS2 raw/effective</span><span id="ns2RateLive">-</span></div>
+        <div class="kv"><span>USB reports</span><span id="usbReports">-</span></div>
+        <div class="kv"><span>Input health</span><span id="inputHealth">-</span></div>
+        <div class="kv"><span>Last error</span><span id="lastError">-</span></div>
+        <h3>命令</h3>
+        <div class="row compact" style="grid-template-columns:minmax(0,1fr) auto; padding:0; background:transparent">
+          <input id="commandInput" value="status" autocomplete="off">
+          <button id="sendBtn" disabled>发送</button>
+        </div>
+        <pre id="lastJson" class="raw">{}</pre>
+        <h3>日志</h3>
+        <pre id="log"></pre>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const DEFAULT_REPORT_ID = 0x7f;
+    const DS5_REPORT_ID = 0xf6;
+    const COMMAND_REPORT_ID = 0x02;
+    const VENDOR_ID = 0x057e;
+    const PRODUCT_ID = 0x2069;
+    const OUT_COMMAND_DELAY_MS = 80;
+    const SET_MAGIC = "Y7HID1";
+    const REPLY_MAGIC = "Y7HRS1";
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+
+    const $ = (id) => document.getElementById(id);
+    const els = {
+      connectBtn: $("connectBtn"), disconnectBtn: $("disconnectBtn"), refreshBtn: $("refreshBtn"),
+      resetBtn: $("resetBtn"), pairBtn: $("pairBtn"), scanBtn: $("scanBtn"), reconnectBtn: $("reconnectBtn"),
+      ns2DisconnectBtn: $("ns2DisconnectBtn"), forgetBtn: $("forgetBtn"), bootromBtn: $("bootromBtn"),
+      sendBtn: $("sendBtn"), commandInput: $("commandInput"), deviceLine: $("deviceLine"),
+      log: $("log"), lastJson: $("lastJson"), usbValue: $("usbValue"), profileValue: $("profileValue"),
+      lockValue: $("lockValue"), ns2Value: $("ns2Value"), ds5Value: $("ds5Value"), inputValue: $("inputValue"),
+      autoConnect: $("autoConnect"), savedTarget: $("savedTarget"), connectedAddr: $("connectedAddr"),
+      candidates: $("candidates"), notify: $("notify"), lastError: $("lastError"), usbReports: $("usbReports"),
+      inputHealth: $("inputHealth"), ds5Rate: $("ds5Rate"), ns2RateLive: $("ns2RateLive"),
+      ds5Device: $("ds5Device"), ds5Firmware: $("ds5Firmware"), ds5Rssi: $("ds5Rssi"),
+      ds5Haptics: $("ds5Haptics"), ds5HapticsNum: $("ds5HapticsNum"), ds5Speaker: $("ds5Speaker"),
+      ds5SpeakerNum: $("ds5SpeakerNum"), ds5Idle: $("ds5Idle"), ds5IdleNum: $("ds5IdleNum"),
+      ds5AudioBuffer: $("ds5AudioBuffer"), ds5AudioBufferNum: $("ds5AudioBufferNum"),
+      ds5Polling: $("ds5Polling"), ds5Controller: $("ds5Controller"), ds5NoIdle: $("ds5NoIdle"),
+      ds5NoLed: $("ds5NoLed"), ds5ApplyBtn: $("ds5ApplyBtn"), ds5SaveBtn: $("ds5SaveBtn"),
+      ds5ReconnectBtn: $("ds5ReconnectBtn"), ns2Scale: $("ns2Scale"), ns2ScaleNum: $("ns2ScaleNum"),
+      ns2Hold: $("ns2Hold"), ns2HoldNum: $("ns2HoldNum"), ns2Tick: $("ns2Tick"), ns2TickNum: $("ns2TickNum"),
+      ns2Stops: $("ns2Stops"), ns2StopsNum: $("ns2StopsNum"), ns2Rate: $("ns2Rate"), ns2RateNum: $("ns2RateNum"),
+      ns2Raw: $("ns2Raw"), ns2Parse: $("ns2Parse"), ns2ApplyBtn: $("ns2ApplyBtn"),
+      ns2SaveBtn: $("ns2SaveBtn"), rumbleOnBtn: $("rumbleOnBtn"), rumbleOffBtn: $("rumbleOffBtn"),
+      rumbleStopBtn: $("rumbleStopBtn"), ns2RecalibrateBtn: $("ns2RecalibrateBtn"),
+      leftDot: $("leftDot"), rightDot: $("rightDot"),
+      leftStickText: $("leftStickText"), rightStickText: $("rightStickText")
+    };
+
+    let device = null;
+    let frameId = 0;
+    let latestUsbVisual = null;
+    let pendingCenterVisual = null;
+    let pendingCenterSince = 0;
+    let lastInputReportAt = 0;
+    let inputHealthTimer = 0;
+    let inputHealthState = "";
+    let busy = false;
+    let lastStatus = null;
+    const CENTER_DEADZONE = 96;
+    const CENTER_DEBOUNCE_MS = 120;
+    const INPUT_TIMEOUT_MS = 1000;
+    const rateTrackers = {
+      ds5: makeRateTracker(),
+      ns2: makeRateTracker()
+    };
+
+    function makeRateTracker() {
+      return {
+        rawTotal: 0,
+        uniqueTotal: 0,
+        rawWindow: 0,
+        uniqueWindow: 0,
+        rawHz: 0,
+        uniqueHz: 0,
+        lastHash: "",
+        start: 0
+      };
+    }
+
+    function setConnected(connected) {
+      for (const button of document.querySelectorAll("button")) {
+        if (button === els.connectBtn) {
+          button.disabled = connected;
+        } else {
+          button.disabled = !connected;
+        }
+      }
+      els.deviceLine.textContent = connected && device
+        ? `${device.productName || "WebHID"} • ${hex(device.vendorId)}:${hex(device.productId)}`
+        : "WebHID disconnected";
+    }
+
+    function isXboxManager() {
+      return device && device.vendorId === 0x045e && device.productId === 0x028e;
+    }
+
+    function clearInputVisual(message) {
+      if (inputHealthState === message) return;
+      inputHealthState = message;
+      latestUsbVisual = null;
+      pendingCenterVisual = null;
+      pendingCenterSince = 0;
+      updateMotion({
+        lx: 2048, ly: 2048, rx: 2048, ry: 2048,
+        motion: { accX: 0, accY: 0, accZ: 0, gyrX: 0, gyrY: 0, gyrZ: 0 }
+      });
+      els.inputHealth.textContent = message;
+    }
+
+    function renderInputHealth() {
+      if (!device || !device.opened) {
+        clearInputVisual("未连接");
+        return;
+      }
+      if (isXboxManager()) {
+        clearInputVisual("Xbox 管理 HID 无 Input report");
+        return;
+      }
+      if (lastStatus && lastStatus.profile === "bridge" &&
+          (lastStatus.input_valid === false || lastStatus.input_stale === true)) {
+        clearInputVisual(lastStatus.input_stale ? "手柄输入已失效" : "等待有效手柄输入");
+        return;
+      }
+      if (!lastInputReportAt) {
+        clearInputVisual("等待 USB Input report");
+        return;
+      }
+      const age = performance.now() - lastInputReportAt;
+      if (age > INPUT_TIMEOUT_MS) {
+        clearInputVisual(`USB Input 超时 (${Math.round(age)} ms)`);
+        return;
+      }
+      inputHealthState = "ok";
+      els.inputHealth.textContent = `USB Input 正常 (${Math.round(age)} ms)`;
+    }
+
+    function hex(value) {
+      return Number(value || 0).toString(16).padStart(4, "0").toUpperCase();
+    }
+
+    function appendLog(text) {
+      const atBottom = els.log.scrollTop + els.log.clientHeight >= els.log.scrollHeight - 8;
+      els.log.textContent += text;
+      if (els.log.textContent.length > 70000) els.log.textContent = els.log.textContent.slice(-52000);
+      if (atBottom) els.log.scrollTop = els.log.scrollHeight;
+    }
+
+    function setValue(el, value, cls = "") {
+      el.textContent = value == null || value === "" ? "-" : String(value);
+      el.className = el.classList.contains("small") ? `value small ${cls}` : `value ${cls}`;
+    }
+
+    function bindPair(range, number) {
+      const sync = (from, to) => { to.value = from.value; };
+      range.addEventListener("input", () => sync(range, number));
+      number.addEventListener("input", () => sync(number, range));
+    }
+
+    for (const [range, number] of [
+      [els.ds5Haptics, els.ds5HapticsNum], [els.ds5Speaker, els.ds5SpeakerNum],
+      [els.ds5Idle, els.ds5IdleNum], [els.ds5AudioBuffer, els.ds5AudioBufferNum],
+      [els.ns2Scale, els.ns2ScaleNum], [els.ns2Hold, els.ns2HoldNum],
+      [els.ns2Tick, els.ns2TickNum], [els.ns2Stops, els.ns2StopsNum],
+      [els.ns2Rate, els.ns2RateNum]
+    ]) bindPair(range, number);
+
+    function hasMagic(data, base) {
+      if (data.length < base + REPLY_MAGIC.length) return false;
+      for (let i = 0; i < REPLY_MAGIC.length; i++) {
+        if (data[base + i] !== REPLY_MAGIC.charCodeAt(i)) return false;
+      }
+      return true;
+    }
+
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    function managerReportId() {
+      return device && device.vendorId === 0x054c &&
+        (device.productId === 0x0ce6 || device.productId === 0x0df2)
+        ? DS5_REPORT_ID : DEFAULT_REPORT_ID;
+    }
+
+    async function sendCommandPayload(payload, options = {}) {
+      if (device.vendorId === VENDOR_ID && device.productId === PRODUCT_ID) {
+        await device.sendReport(COMMAND_REPORT_ID, payload);
+        await sleep(options.outDelayMs ?? OUT_COMMAND_DELAY_MS);
+        return;
+      }
+      await device.sendFeatureReport(managerReportId(), payload);
+    }
+
+    async function sendCommand(command, options = {}) {
+      if (!device || !device.opened) throw new Error("WebHID device is not open");
+      if (busy && !options.allowBusy) throw new Error("command busy");
+      busy = true;
+      try {
+        const reportId = managerReportId();
+        const payload = new Uint8Array(63);
+        payload.set(encoder.encode(SET_MAGIC + command.trim()).slice(0, payload.length));
+        await sendCommandPayload(payload, options);
+
+        let total = -1;
+        let received = 0;
+        let result = new Uint8Array(1024);
+        for (let attempt = 0; attempt < 32; attempt++) {
+          const view = await device.receiveFeatureReport(reportId);
+          const data = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+          const base = hasMagic(data, 1) && data[0] === reportId ? 1 : 0;
+          if (!hasMagic(data, base)) throw new Error("bad reply magic");
+          total = data[base + 6] | (data[base + 7] << 8);
+          const offset = data[base + 8] | (data[base + 9] << 8);
+          const chunkLen = data[base + 10];
+          if (total > result.length) {
+            const grown = new Uint8Array(total);
+            grown.set(result);
+            result = grown;
+          }
+          if (chunkLen > 0) {
+            result.set(data.slice(base + 11, base + 11 + chunkLen), offset);
+            received = Math.max(received, offset + chunkLen);
+          }
+          if (total >= 0 && received >= total) break;
+        }
+        if (total < 0 || received < total) throw new Error("incomplete reply");
+        const text = decoder.decode(result.slice(0, total));
+        if (options.log !== false) appendLog(`> ${command}\n${text}\n`);
+        const json = JSON.parse(text);
+        els.lastJson.textContent = JSON.stringify(json, null, 2);
+        return json;
+      } finally {
+        busy = false;
+      }
+    }
+
+    async function safeCommand(command, options = {}) {
+      try {
+        return await sendCommand(command, options);
+      } catch (err) {
+        if (options.log !== false) appendLog(`[web] ${command}: ${err.message}\n`);
+        return null;
+      }
+    }
+
+    function updateStatus(data) {
+      if (!data) return;
+      lastStatus = data;
+      const ns2 = data.ns2 || {};
+      setValue(els.usbValue, data.usb, data.usb === "debug_only" ? "warn" : "ok");
+      setValue(els.profileValue, data.active || data.profile || "-", data.locked ? "ok" : "warn");
+      setValue(els.lockValue, data.locked ? "locked" : "detecting", data.locked ? "ok" : "warn");
+      setValue(els.ds5Value, data.bt_classic_connected ? "connected" : "idle", data.bt_classic_connected ? "ok" : "");
+      setValue(els.ns2Value, `${ns2.ble_state || "-"} / ${data.ns2_connected ? "connected" : "idle"}`, data.ns2_connected ? "ok" : "");
+      setValue(els.inputValue, `DS5 ${data.ds5_reports ?? 0} / NS2 ${data.ns2_reports ?? 0}`);
+      els.autoConnect.textContent = ns2.auto_connect || "-";
+      els.savedTarget.textContent = ns2.saved_target || "-";
+      els.connectedAddr.textContent = ns2.connected_addr || "-";
+      els.candidates.textContent = ns2.candidate_count ?? "-";
+      els.notify.textContent = `${ns2.notify_count ?? 0} @ ${ns2.notify_hz ?? 0} Hz`;
+      els.lastError.textContent = ns2.last_error || "-";
+    }
+
+    function updateDs5(data) {
+      if (!data || !data.config) return;
+      const cfg = data.config;
+      els.ds5Device.textContent = device ? `${device.productName || "-"} • ${hex(device.vendorId)}:${hex(device.productId)}` : "-";
+      els.ds5Firmware.textContent = data.firmware || "-";
+      els.ds5Rssi.textContent = Number.isFinite(data.rssi) ? `${data.rssi} dBm` : "-";
+      els.ds5Haptics.value = els.ds5HapticsNum.value = Number(cfg.haptics_gain || 1).toFixed(2);
+      els.ds5Speaker.value = els.ds5SpeakerNum.value = Math.round(cfg.speaker_volume ?? -100);
+      els.ds5Idle.value = els.ds5IdleNum.value = cfg.inactive_time ?? 30;
+      els.ds5AudioBuffer.value = els.ds5AudioBufferNum.value = cfg.audio_buffer_length ?? 64;
+      els.ds5Polling.value = String(cfg.polling_rate_mode ?? 0);
+      els.ds5Controller.value = String(cfg.controller_mode ?? 2);
+      els.ds5NoIdle.checked = !!cfg.disable_inactive_disconnect;
+      els.ds5NoLed.checked = !!cfg.disable_pico_led;
+    }
+
+    function updateNs2Settings(data) {
+      if (!data) return;
+      if (Number.isFinite(data.rumble_scale_percent)) els.ns2Scale.value = els.ns2ScaleNum.value = data.rumble_scale_percent;
+      if (Number.isFinite(data.scale_percent)) els.ns2Scale.value = els.ns2ScaleNum.value = data.scale_percent;
+      if (Number.isFinite(data.rumble_hold_ms)) els.ns2Hold.value = els.ns2HoldNum.value = data.rumble_hold_ms;
+      if (Number.isFinite(data.hold_ms)) els.ns2Hold.value = els.ns2HoldNum.value = data.hold_ms;
+      if (Number.isFinite(data.rumble_tick_ms)) els.ns2Tick.value = els.ns2TickNum.value = data.rumble_tick_ms;
+      if (Number.isFinite(data.tick_ms)) els.ns2Tick.value = els.ns2TickNum.value = data.tick_ms;
+      if (Number.isFinite(data.rumble_stop_packets)) els.ns2Stops.value = els.ns2StopsNum.value = data.rumble_stop_packets;
+      if (Number.isFinite(data.stop_packets)) els.ns2Stops.value = els.ns2StopsNum.value = data.stop_packets;
+      if (Number.isFinite(data.report_rate_hz)) els.ns2Rate.value = els.ns2RateNum.value = data.report_rate_hz;
+      if ("usb_raw_passthrough" in data) els.ns2Raw.checked = !!data.usb_raw_passthrough;
+      if ("web_parse_reports" in data) els.ns2Parse.checked = !!data.web_parse_reports;
+      if ("reports_sent" in data) els.usbReports.textContent = `${data.reports_sent} sent / ${data.reports_failed ?? 0} failed`;
+    }
+
+    function setDot(dot, x, y) {
+      const nx = Math.max(0, Math.min(1, Number(x ?? 2048) / 4095));
+      const ny = Math.max(0, Math.min(1, Number(y ?? 2048) / 4095));
+      dot.style.left = `${nx * 94}px`;
+      dot.style.top = `${ny * 94}px`;
+    }
+
+    function updateMotion(data) {
+      if (!data) return;
+      const ly = data.flipY ? 4095 - Number(data.ly ?? 2048) : data.ly;
+      const ry = data.flipY ? 4095 - Number(data.ry ?? 2048) : data.ry;
+      setDot(els.leftDot, data.lx, ly);
+      setDot(els.rightDot, data.rx, ry);
+      els.leftStickText.textContent = `左 ${data.lx ?? 2048}, ${ly ?? 2048}`;
+      els.rightStickText.textContent = `右 ${data.rx ?? 2048}, ${ry ?? 2048}`;
+      const motion = data.motion || data;
+      for (const key of ["accX", "accY", "accZ", "gyrX", "gyrY", "gyrZ"]) {
+        const v = Number(motion[key] ?? motion[key.toLowerCase()] ?? 0);
+        const meter = $(key);
+        const text = $(`${key}Text`);
+        if (meter) meter.value = v;
+        if (text) text.textContent = v;
+      }
+    }
+
+    function bytesFromDataView(view) {
+      return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+    }
+
+    function unpack12(bytes, offset) {
+      return {
+        x: bytes[offset] | ((bytes[offset + 1] & 0x0f) << 8),
+        y: (bytes[offset + 1] >> 4) | (bytes[offset + 2] << 4)
+      };
+    }
+
+    function i16le(bytes, offset) {
+      const value = bytes[offset] | (bytes[offset + 1] << 8);
+      return value & 0x8000 ? value - 0x10000 : value;
+    }
+
+    function simpleHash(bytes, ignore = []) {
+      let h = 2166136261;
+      const skip = new Set(ignore);
+      for (let i = 0; i < bytes.length; i++) {
+        if (skip.has(i)) continue;
+        h ^= bytes[i];
+        h = Math.imul(h, 16777619);
+      }
+      return String(h >>> 0);
+    }
+
+    function noteRate(kind, hash) {
+      const tracker = rateTrackers[kind];
+      const now = performance.now();
+      if (!tracker.start) tracker.start = now;
+      tracker.rawTotal++;
+      tracker.rawWindow++;
+      if (hash !== tracker.lastHash) {
+        tracker.uniqueTotal++;
+        tracker.uniqueWindow++;
+        tracker.lastHash = hash;
+      }
+      const elapsed = now - tracker.start;
+      if (elapsed >= 500) {
+        tracker.rawHz = Math.round((tracker.rawWindow * 1000) / elapsed);
+        tracker.uniqueHz = Math.round((tracker.uniqueWindow * 1000) / elapsed);
+        tracker.rawWindow = 0;
+        tracker.uniqueWindow = 0;
+        tracker.start = now;
+      }
+      const ds5 = rateTrackers.ds5;
+      const ns2 = rateTrackers.ns2;
+      els.ds5Rate.textContent = `${ds5.rawHz} / ${ds5.uniqueHz} Hz`;
+      els.ns2RateLive.textContent = `${ns2.rawHz} / ${ns2.uniqueHz} Hz`;
+      els.usbReports.textContent = `DS5 ${ds5.rawTotal}/${ds5.uniqueTotal}, NS2 ${ns2.rawTotal}/${ns2.uniqueTotal}`;
+    }
+
+    function axisIsCentered(value) {
+      return Math.abs(Number(value ?? 2048) - 2048) <= CENTER_DEADZONE;
+    }
+
+    function visualIsCentered(data) {
+      return data &&
+        axisIsCentered(data.lx) &&
+        axisIsCentered(data.ly) &&
+        axisIsCentered(data.rx) &&
+        axisIsCentered(data.ry);
+    }
+
+    function acceptUsbVisual(parsed) {
+      const now = performance.now();
+      const centered = visualIsCentered(parsed);
+      const wasCentered = visualIsCentered(latestUsbVisual);
+
+      if (centered && latestUsbVisual && !wasCentered) {
+        if (!pendingCenterVisual) {
+          pendingCenterSince = now;
+        }
+        pendingCenterVisual = parsed;
+        if (now - pendingCenterSince < CENTER_DEBOUNCE_MS) {
+          return;
+        }
+      } else {
+        pendingCenterVisual = null;
+        pendingCenterSince = 0;
+      }
+
+      latestUsbVisual = parsed;
+    }
+
+    function parseDs5InputReport(bytes) {
+      if (bytes.length < 27) return null;
+      return {
+        lx: Math.round((bytes[0] * 4095) / 255),
+        ly: Math.round((bytes[1] * 4095) / 255),
+        rx: Math.round((bytes[2] * 4095) / 255),
+        ry: Math.round((bytes[3] * 4095) / 255),
+        buttons: bytes[7] | (bytes[8] << 8) | (bytes[9] << 16),
+        motion: {
+          gyrX: i16le(bytes, 15),
+          gyrY: i16le(bytes, 19),
+          gyrZ: i16le(bytes, 17),
+          accX: i16le(bytes, 21),
+          accY: i16le(bytes, 23),
+          accZ: i16le(bytes, 25)
+        },
+        source: "DS5 USB input"
+      };
+    }
+
+    function parseNs2InputReport(bytes) {
+      if (bytes.length < 0x3c) return null;
+      const left = unpack12(bytes, 10);
+      const right = unpack12(bytes, 13);
+      return {
+        lx: left.x,
+        ly: left.y,
+        rx: right.x,
+        ry: right.y,
+        flipY: true,
+        buttons: bytes[4] | (bytes[5] << 8) | (bytes[6] << 16),
+        motion: {
+          accX: i16le(bytes, 0x30),
+          accY: i16le(bytes, 0x32),
+          accZ: i16le(bytes, 0x34),
+          gyrX: i16le(bytes, 0x36),
+          gyrY: i16le(bytes, 0x38),
+          gyrZ: i16le(bytes, 0x3a)
+        },
+        source: "NS2 USB input"
+      };
+    }
+
+    function handleInputReport(event) {
+      const bytes = bytesFromDataView(event.data);
+      if (event.reportId === 1) {
+        const parsed = parseDs5InputReport(bytes);
+        if (!parsed) return;
+        lastInputReportAt = performance.now();
+        noteRate("ds5", simpleHash(bytes, [6]));
+        acceptUsbVisual(parsed);
+      } else if (event.reportId === 5) {
+        const parsed = parseNs2InputReport(bytes);
+        if (!parsed) return;
+        lastInputReportAt = performance.now();
+        noteRate("ns2", simpleHash(bytes, [0, 0x2a, 0x2b, 0x2c, 0x2d]));
+        acceptUsbVisual(parsed);
+      }
+    }
+
+    async function refreshInputHealth() {
+      if (!device || !device.opened || busy || isXboxManager()) return;
+      const status = await safeCommand("bridge status", { log: false });
+      if (status && status.profile === "bridge") lastStatus = status;
+    }
+
+    async function refreshStatic(options = {}) {
+      const status = await safeCommand("status", { log: options.log });
+      updateStatus(status);
+      updateDs5(await safeCommand("ds5 config", { log: options.log }));
+      updateNs2Settings(await safeCommand("settings", { log: options.log }));
+      updateNs2Settings(await safeCommand("usb status", { log: options.log }));
+    }
+
+    function renderFrame() {
+      renderInputHealth();
+      if (latestUsbVisual) {
+        updateMotion(latestUsbVisual);
+      }
+      frameId = requestAnimationFrame(renderFrame);
+    }
+
+    function startRealtimeLoops() {
+      stopRealtimeLoops();
+      frameId = requestAnimationFrame(renderFrame);
+      inputHealthTimer = setInterval(refreshInputHealth, 1000);
+    }
+
+    function stopRealtimeLoops() {
+      if (frameId) cancelAnimationFrame(frameId);
+      frameId = 0;
+      if (inputHealthTimer) clearInterval(inputHealthTimer);
+      inputHealthTimer = 0;
+    }
+
+    async function connectHid() {
+      if (!("hid" in navigator)) {
+        appendLog("[web] 当前浏览器不支持 WebHID\n");
+        return;
+      }
+      const devices = await navigator.hid.requestDevice({
+        filters: [
+          { vendorId: 0xcafe, productId: 0x4012 },
+          { vendorId: 0x045e, productId: 0x028e },
+          { vendorId: 0x054c, productId: 0x0ce6 },
+          { vendorId: 0x054c, productId: 0x0df2 },
+          { vendorId: 0x057e, productId: 0x2069 }
+        ]
+      });
+      device = devices[0];
+      if (!device) return;
+      await device.open();
+      latestUsbVisual = null;
+      lastInputReportAt = 0;
+      inputHealthState = "";
+      pendingCenterVisual = null;
+      pendingCenterSince = 0;
+      rateTrackers.ds5 = makeRateTracker();
+      rateTrackers.ns2 = makeRateTracker();
+      device.addEventListener("inputreport", handleInputReport);
+      setConnected(true);
+      await refreshStatic({ log: true });
+      startRealtimeLoops();
+    }
+
+    async function disconnect() {
+      stopRealtimeLoops();
+      try { if (device) device.removeEventListener("inputreport", handleInputReport); } catch {}
+      try { if (device && device.opened) await device.close(); } catch {}
+      device = null;
+      latestUsbVisual = null;
+      lastInputReportAt = 0;
+      inputHealthState = "";
+      pendingCenterVisual = null;
+      pendingCenterSince = 0;
+      setConnected(false);
+    }
+
+    async function applyDs5() {
+      const cmd = [
+        "ds5 set",
+        els.ds5HapticsNum.value,
+        els.ds5SpeakerNum.value,
+        els.ds5IdleNum.value,
+        els.ds5NoIdle.checked ? 1 : 0,
+        els.ds5NoLed.checked ? 1 : 0,
+        els.ds5Polling.value,
+        els.ds5AudioBufferNum.value,
+        els.ds5Controller.value
+      ].join(" ");
+      updateDs5(await safeCommand(cmd));
+    }
+
+    async function applyNs2() {
+      updateNs2Settings(await safeCommand(`rumble tune ${els.ns2ScaleNum.value} ${els.ns2HoldNum.value} ${els.ns2TickNum.value} ${els.ns2StopsNum.value}`));
+      updateNs2Settings(await safeCommand(`usb rate ${els.ns2RateNum.value}`));
+      updateNs2Settings(await safeCommand(`usb raw ${els.ns2Raw.checked ? "on" : "off"}`));
+      updateNs2Settings(await safeCommand(`web parse ${els.ns2Parse.checked ? "on" : "off"}`));
+    }
+
+    els.connectBtn.addEventListener("click", () => connectHid().catch(err => appendLog(`[web] HID connect failed: ${err.message}\n`)));
+    els.disconnectBtn.addEventListener("click", () => disconnect());
+    els.refreshBtn.addEventListener("click", () => refreshStatic({ log: true }));
+    els.resetBtn.addEventListener("click", async () => updateStatus(await safeCommand("reset detect")));
+    els.pairBtn.addEventListener("click", async () => updateStatus(await safeCommand("ns2 pair")));
+    els.scanBtn.addEventListener("click", async () => updateStatus(await safeCommand("ns2 scan")));
+    els.reconnectBtn.addEventListener("click", async () => updateStatus(await safeCommand("ns2 reconnect")));
+    els.ns2DisconnectBtn.addEventListener("click", async () => updateStatus(await safeCommand("ns2 disconnect")));
+    els.forgetBtn.addEventListener("click", async () => updateStatus(await safeCommand("ns2 forget")));
+    els.bootromBtn.addEventListener("click", () => safeCommand("bootrom"));
+    els.sendBtn.addEventListener("click", () => safeCommand(els.commandInput.value));
+    els.commandInput.addEventListener("keydown", event => { if (event.key === "Enter") safeCommand(els.commandInput.value); });
+    els.ds5ApplyBtn.addEventListener("click", () => applyDs5());
+    els.ds5SaveBtn.addEventListener("click", async () => updateDs5(await safeCommand("ds5 save")));
+    els.ds5ReconnectBtn.addEventListener("click", () => safeCommand("ds5 usb reconnect"));
+    els.ns2ApplyBtn.addEventListener("click", () => applyNs2());
+    els.ns2SaveBtn.addEventListener("click", async () => updateNs2Settings(await safeCommand("settings save")));
+    els.rumbleOnBtn.addEventListener("click", async () => updateNs2Settings(await safeCommand("rumble on")));
+    els.rumbleOffBtn.addEventListener("click", async () => updateNs2Settings(await safeCommand("rumble off")));
+    els.rumbleStopBtn.addEventListener("click", async () => updateNs2Settings(await safeCommand("rumble stop")));
+    els.ns2RecalibrateBtn.addEventListener("click", async () => updateNs2Settings(await safeCommand("stick recalibrate")));
+    for (const button of document.querySelectorAll("[data-test]")) {
+      button.addEventListener("click", async () => updateNs2Settings(await safeCommand(`rumble test ${button.dataset.test}`)));
+    }
+    navigator.hid?.addEventListener("disconnect", event => {
+      if (device && event.device === device) disconnect();
+    });
+    setConnected(false);
+  </script>
+</body>
+</html>

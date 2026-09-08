@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "runtimeApiVersion": 1,
+  "id": "pico-unified-bridge",
+  "moduleVersion": "0.1.0",
+  "displayName": "Pico 2 W Controller Bridge",
+  "boardFamily": "Raspberry Pi Pico 2 W",
+  "description": "Pico 2 W 上统一接收 DS5 与 NS2Pro，并切换对应 USB 身份。",
+  "priority": 90,
+  "capabilities": "DeviceStatus, LiveInput, UsbRoleSelection, InputSourceSelection, WirelessControllers, Rumble, UsbAudio, Motion, Settings, SelfTest, RawCommands, FirmwareFlashing",
+  "matchAny": [
+    { "profileKeys": ["pico-auto-manager"] }
+  ],
+  "hidDevices": [
+    {
+      "key": "pico-auto-manager", "displayName": "Pico 2 W Controller Bridge Manager",
+      "vendorId": 51966, "productId": 16402,
+      "managerUsagePage": 65280, "managerUsageId": 1,
+      "managerFeatureReportId": 127, "usbRole": "Unknown",
+      "tags": ["pico2w", "unified", "ds5", "ns2pro"],
+      "supportsInputReports": true
+    },
+    {
+      "key": "pico-dualsense", "displayName": "Pico 2 W DualSense Manager",
+      "vendorId": 1356, "productId": 3302,
+      "managerUsagePage": 1, "managerUsageId": 5,
+      "managerFeatureReportId": 246, "usbRole": "DualSense",
+      "legacyManagerProductName": "Pico 2 W DualSense HID",
+      "tags": ["pico2w", "ds5", "dualsense"],
+      "supportsInputReports": true
+    }
+  ],
+  "boards": [
+    {
+      "id": "pico-2-w",
+      "displayName": "Raspberry Pi Pico 2 W",
+      "family": "RP2350",
+      "description": "NS2Pro 与 DualSense 的统一接收目标。"
+    }
+  ],
+  "firmware": [
+    {
+      "id": "pico-unified-current",
+      "displayName": "Pico 2 W Controller Bridge",
+      "version": "0.1.0",
+      "description": "自动识别 DualSense/NS2Pro，并切换对应 USB 身份。",
+      "boardIds": ["pico-2-w"],
+      "flashMethod": "PicoUf2",
+      "artifactRelativePath": "artifacts/pico-controller-bridge-0.1.uf2",
+      "flashHint": "按住 BOOTSEL 接入电脑，然后将 UF2 写入 RPI-RP2 盘。"
+    }
+  ],
+  "usbRoles": [
+    { "role": "DualSense", "displayName": "DualSense / DS5", "description": "Sony HID 身份", "command": "role set ds5" },
+    { "role": "NintendoNs2Pro", "displayName": "Nintendo NS2Pro", "description": "原生 Nintendo 身份", "command": "role set ns2pro" }
+  ],
+  "inputSources": [
+    { "preference": "Auto", "displayName": "自动选择", "description": "优先使用已连接控制器", "command": "input set auto" },
+    { "preference": "DualSense", "displayName": "仅使用 DualSense", "description": "Bluetooth Classic HID", "command": "input set ds5" },
+    { "preference": "NintendoNs2Pro", "displayName": "仅使用 NS2Pro", "description": "Bluetooth LE", "command": "input set ns2pro" }
+  ],
+  "wirelessControllers": [
+    {
+      "id": "ds5",
+      "displayName": "DualSense / DS5",
+      "transportLabel": "Bluetooth Classic",
+      "pairCommand": "ds5 pair",
+      "connectCommand": "ds5 reconnect",
+      "disconnectCommand": "ds5 disconnect",
+      "forgetCommand": "ds5 forget"
+    },
+    {
+      "id": "ns2",
+      "displayName": "Nintendo NS2Pro",
+      "transportLabel": "Bluetooth LE",
+      "pairCommand": "ns2 pair",
+      "connectCommand": "ns2 reconnect",
+      "disconnectCommand": "ns2 disconnect",
+      "forgetCommand": "ns2 forget"
+    }
+  ],
+  "statusCommands": ["status", "usb status"],
+  "selfTestCommands": ["status", "usb status", "input status", "motion status", "ds5 status"],
+  "primaryStatusCommand": "status",
+  "inputStatusCommand": "input status",
+  "saveSettingsCommand": "settings save",
+  "settingsCommandTemplates": [
+    "rumble tune {rumbleScalePercent} {rumbleHoldMs} {rumbleTickMs} {rumbleStopPackets}",
+    "usb rate {reportRateHz}",
+    "usb raw {usbRaw}",
+    "web parse {liveParsing}"
+  ],
+  "rumbleCommandTemplate": "rumble test {target}"
+}

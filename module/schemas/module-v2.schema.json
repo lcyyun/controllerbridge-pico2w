@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://controller-bridge.dev/schemas/module-v2.schema.json",
+  "title": "Controller Bridge Runtime API 2 module",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "runtimeApiVersion",
+    "id",
+    "moduleVersion",
+    "displayName",
+    "operations",
+    "pages"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "runtimeApiVersion": { "const": 2 },
+    "id": { "$ref": "#/$defs/id" },
+    "moduleVersion": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "displayName": { "type": "string", "minLength": 1 },
+    "boardFamily": { "type": "string" },
+    "description": { "type": "string" },
+    "priority": { "type": "integer" },
+    "capabilities": { "type": "string" },
+    "matchAny": { "type": "array", "items": { "type": "object" } },
+    "hidDevices": { "type": "array", "items": { "type": "object" } },
+    "boards": { "type": "array", "items": { "type": "object" } },
+    "firmware": { "type": "array", "items": { "type": "object" } },
+    "usbRoles": { "type": "array", "items": { "type": "object" } },
+    "inputSources": { "type": "array", "items": { "type": "object" } },
+    "wirelessControllers": { "type": "array", "items": { "type": "object" } },
+    "statusCommands": { "$ref": "#/$defs/stringArray" },
+    "selfTestCommands": { "$ref": "#/$defs/stringArray" },
+    "primaryStatusCommand": { "type": "string" },
+    "inputStatusCommand": { "type": "string" },
+    "saveSettingsCommand": { "type": ["string", "null"] },
+    "settingsCommandTemplates": { "$ref": "#/$defs/stringArray" },
+    "rumbleCommandTemplate": { "type": ["string", "null"] },
+    "operations": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/id" },
+      "additionalProperties": { "$ref": "#/$defs/operation" }
+    },
+    "pages": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/page" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9A-Za-z_.-]+$",
+      "minLength": 1
+    },
+    "stringArray": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "jsonPointer": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "operation": {
+      "type": "object",
+      "required": ["transport", "request"],
+      "properties": {
+        "transport": { "const": "ManagerCommand" },
+        "request": { "type": "string", "minLength": 1 },
+        "response": {
+          "type": "object",
+          "required": ["select"],
+          "properties": {
+            "select": { "$ref": "#/$defs/jsonPointer" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "page": {
+      "type": "object",
+      "required": ["id", "label", "sections"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "icon": { "type": "string" },
+        "sections": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/section" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "section": {
+      "type": "object",
+      "required": ["id", "label", "controls"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "controls": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/control" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "control": {
+      "type": "object",
+      "required": ["id", "type", "label"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "type": {
+          "enum": [
+            "Toggle", "Number", "Slider", "Select", "Text", "Color",
+            "ActionButton", "Status", "Table", "MappingEditor", "Group", "Tabs"
+          ]
+        },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "binding": { "$ref": "#/$defs/jsonPointer" },
+        "default": {},
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "step": { "type": "number", "exclusiveMinimum": 0 },
+        "unit": { "type": "string" },
+        "options": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/option" }
+        },
+        "readAction": { "$ref": "#/$defs/id" },
+        "applyAction": { "$ref": "#/$defs/id" },
+        "resetAction": { "$ref": "#/$defs/id" },
+        "saveAction": { "$ref": "#/$defs/id" },
+        "mappingProfile": { "enum": ["ds5", "ns2pro"] },
+        "sourceCatalog": { "$ref": "#/$defs/id" },
+        "targetCatalog": { "$ref": "#/$defs/id" },
+        "visibleWhen": { "$ref": "#/$defs/condition" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "type": { "const": "MappingEditor" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": [
+              "binding", "sourceCatalog", "targetCatalog", "readAction",
+              "applyAction", "resetAction", "saveAction"
+            ]
+          },
+          "else": {
+            "not": { "required": ["mappingProfile"] }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "ActionButton" } },
+            "required": ["type"]
+          },
+          "then": { "required": ["applyAction"] }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "option": {
+      "type": "object",
+      "required": ["value", "label"],
+      "properties": {
+        "value": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "condition": {
+      "type": "object",
+      "required": ["binding", "operator", "value"],
+      "properties": {
+        "binding": { "$ref": "#/$defs/jsonPointer" },
+        "operator": { "enum": ["Equals", "NotEquals"] },
+        "value": {}
+      },
+      "additionalProperties": false
+    }
+  }
+}

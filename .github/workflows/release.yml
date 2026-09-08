@@ -1,0 +1,26 @@
+name: Validate release candidate (no publishing)
+
+# Automatic tag/release publishing is deliberately disabled until hardware
+# validation and the parent module/release packaging contract are complete.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Candidate version string (build only, no tag or release)
+        type: string
+        required: true
+      ns2pro:
+        description: Also compile the separate NS2-only variant
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Compile candidate without publishing
+    uses: ./.github/workflows/build-firmware.yml
+    with:
+      version: ${{ inputs.version }}
+      ns2pro: ${{ inputs.ns2pro }}
