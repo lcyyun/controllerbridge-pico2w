@@ -32,6 +32,10 @@ const uint8_t UUID_RUMBLE_CC48[NS2_UUID128_LEN] = {
     0xcc, 0x48, 0x3f, 0x51, 0x92, 0x58, 0x42, 0x7d,
     0xa9, 0x39, 0x63, 0x0c, 0x31, 0xf7, 0x2b, 0x05
 };
+const uint8_t UUID_RUMBLE_OUTPUT[NS2_UUID128_LEN] = {
+    0x28, 0x93, 0x26, 0xcb, 0xa4, 0x71, 0x48, 0x5d,
+    0xa8, 0xf4, 0x24, 0x0c, 0x14, 0xf1, 0x82, 0x41
+};
 
 uint8_t INIT_CMD_0[] = {0x03, 0x91, 0x01, 0x0d, 0x00, 0x08, 0x00, 0x00, 0x01, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 const uint8_t INIT_CMD_1[] = {0x07, 0x91, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00};
@@ -73,7 +77,8 @@ void ns2_gatt_set_console_mac(const uint8_t mac[6]) {
     if (!mac) {
         return;
     }
-    memcpy(&INIT_CMD_0[10], mac, 6);
+    // BTstack bd_addr_t is display order, Nintendo's vendor protocol is LE.
+    for (size_t i = 0; i < 6; ++i) INIT_CMD_0[10 + i] = mac[5 - i];
     printf("[NS2 GATT] console MAC in INIT set to %02x:%02x:%02x:%02x:%02x:%02x\n",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
@@ -95,7 +100,8 @@ Ns2GattRole ns2_gatt_classify_uuid(uint16_t uuid16, const uint8_t uuid128[NS2_UU
     if (ns2_gatt_uuid128_equals(uuid128, UUID_COMMAND)) {
         return Ns2GattRole::Command;
     }
-    if (ns2_gatt_uuid128_equals(uuid128, UUID_RUMBLE_CC48)) {
+    if (ns2_gatt_uuid128_equals(uuid128, UUID_RUMBLE_CC48) ||
+        ns2_gatt_uuid128_equals(uuid128, UUID_RUMBLE_OUTPUT)) {
         return Ns2GattRole::Rumble;
     }
     return Ns2GattRole::Other;
@@ -146,4 +152,23 @@ const Ns2InitCommand &ns2_gatt_init_command(uint8_t index) {
         index = static_cast<uint8_t>(ns2_gatt_init_command_count() - 1);
     }
     return INIT_COMMANDS[index];
+}
+
+size_t ns2_gatt_build_pair_command(uint8_t *out, size_t capacity, uint8_t subcommand,
+                                   const uint8_t *payload, size_t payload_len) {
+    if (!out || !payload || payload_len == 0 || payload_len > 24 || capacity < payload_len + 8) return 0;
+    const uint8_t header[] = {0x15, 0x91, 0x01, subcommand, 0, static_cast<uint8_t>(payload_len), 0, 0};
+    memcpy(out, header, sizeof(header));
+    memcpy(out + 8, payload, payload_len);
+    return payload_len + 8;
+}
+
+bool ns2_gatt_parse_pair_response(const uint8_t *data, size_t len,
+                                  uint8_t subcommand, const uint8_t **payload) {
+    if (payload) *payload = nullptr;
+    const size_t required = subcommand == 1 ? 9 : (subcommand == 2 || subcommand == 4 ? 17 : 1);
+    if (!data || len < 8 + required || data[0] != 0x15 || data[1] != 1 ||
+        data[2] != 1 || data[3] != subcommand || data[8] != 1) return false;
+    if (payload) *payload = data + 8;
+    return true;
 }

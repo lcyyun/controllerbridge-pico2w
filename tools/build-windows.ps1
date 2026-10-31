@@ -24,8 +24,8 @@
 
 .PARAMETER Repo
     When run standalone (the script is not inside a checkout), the project
-    git URL to clone. Defaults to lcyyun/controllerbridge-pico2w (private;
-    authenticate Git separately). Override to build a fork.
+    git URL to clone. Defaults to lcyyun/controllerbridge-pico2w.
+    Override to build a fork.
 
 .PARAMETER UseInstalledTools
     Do not install tools or change SDK checkouts. Requires Git, CMake, Ninja,
@@ -62,6 +62,8 @@ param(
     [string]$SdkPath = $env:PICO_SDK_PATH,
     [string]$ArmToolchainPath = $env:PICO_TOOLCHAIN_PATH,
     [string]$Version = 'dev',
+    [ValidateSet(150000, 320000)]
+    [int]$ClockKHz = 150000,
     [ValidateRange(1, 64)]
     [int]$Jobs = 2
 )
@@ -70,7 +72,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 # Bump on every change so a stale download is obvious in the banner.
-$SCRIPT_REV   = '2026-09-08.1'
+$SCRIPT_REV   = '2026-10-31.1'
 
 # --- Pinned versions: keep in sync with .github/workflows/build-firmware.yml ---
 $PICO_SDK_REF = '2.2.0'
@@ -79,6 +81,7 @@ $PICO_SDK_SHA = 'a1438dff1d38bd9c65dbd693f0e5db4b9ae91779'
 $TINYUSB_SHA  = '3af1bec1a9161ee8dec29487831f7ac7ade9e189'
 $BTSTACK_SHA  = '501e6d2b86e6c92bfb9c390bcf55709938e25ac1'
 $CYW43_SHA    = 'dd7568229f3bf7a37737b9e1ef250c26efe75b23'
+$LWIP_SHA     = '77dcd25a72509eb83f72b033d219b1d40cd8eb95'
 $ARM_VER      = '14.2.rel1'
 $ARM_ZIP      = "arm-gnu-toolchain-$ARM_VER-mingw-w64-x86_64-arm-none-eabi.zip"
 $ARM_URL      = "https://developer.arm.com/-/media/Files/downloads/gnu/$ARM_VER/binrel/$ARM_ZIP"
@@ -295,6 +298,7 @@ function Ensure-PicoSdk {
     Assert-GitPin (Join-Path $SdkPath 'lib\tinyusb') $TINYUSB_SHA
     Assert-GitPin (Join-Path $SdkPath 'lib\btstack') $BTSTACK_SHA
     Assert-GitPin (Join-Path $SdkPath 'lib\cyw43-driver') $CYW43_SHA
+    Assert-GitPin (Join-Path $SdkPath 'lib\lwip') $LWIP_SHA
 }
 
 # --- Locate the project: existing checkout, or clone under $ToolsHome --------
@@ -507,6 +511,7 @@ $cmakeArgs = @(
     '-DENABLE_NS2PRO=OFF', '-DENABLE_AUTO_PROFILE=ON',
     '-DENABLE_SERIAL=OFF', '-DENABLE_VERBOSE=OFF', '-DENABLE_WAKE_HID=OFF',
     "-DVERSION=$Version",
+    "-DBRIDGE_SYS_CLOCK_KHZ=$ClockKHz",
     "-DPython3_EXECUTABLE=$($PythonExe -replace '\\','/')"
 )
 switch ($Variant) {
@@ -519,6 +524,8 @@ Info "Configuring: cmake $($cmakeArgs -join ' ')"
 & cmake @cmakeArgs
 if ($LASTEXITCODE -ne 0) { Die 'CMake configure failed.' }
 
+# Also bound SDK ExternalProject builds (pioasm/picotool) on shared hosts.
+$env:CMAKE_BUILD_PARALLEL_LEVEL = [string]$Jobs
 Info 'Building firmware...'
 & cmake --build $buildDir --target ds5-bridge --parallel $Jobs
 if ($LASTEXITCODE -ne 0) { Die 'Build failed.' }
@@ -526,6 +533,8 @@ if ($LASTEXITCODE -ne 0) { Die 'Build failed.' }
 # --- Collect output ----------------------------------------------------------
 $uf2 = Join-Path $buildDir 'ds5-bridge.uf2'
 if (-not (Test-Path $uf2)) { Die "Expected $uf2 was not produced." }
+& $PythonExe (Join-Path $RepoRoot 'tools/verify-firmware.py') $uf2
+if ($LASTEXITCODE -ne 0) { Die 'UF2 family, block or reserved Flash validation failed.' }
 
 $outName = switch ($Variant) {
     'unified' { 'controllerbridge-pico2w-unified.uf2' }

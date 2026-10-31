@@ -10,6 +10,7 @@
 #include "utils.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
+#include "pico/flash.h"
 #include "pico/cyw43_arch.h"
 
 constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
@@ -88,6 +89,17 @@ void config_valid() {
 void config_load() {
     memcpy(&config, flash_config(), sizeof(Config));
 
+    if (config.magic != CONFIG_MAGIC || config.version != CONFIG_VERSION ||
+        config.size != sizeof(Config_body) || config.crc32 != calc_config_crc(config)) {
+        config_default();
+    }
+    config_valid();
+}
+
+void config_default() {
+    memset(&config, 0, sizeof(config));
+    config.body.haptics_gain=1.0f; config.body.speaker_volume=-100.0f;
+    config.body.inactive_time=30; config.body.audio_buffer_length=64; config.body.controller_mode=2;
     config_valid();
 }
 
@@ -97,10 +109,11 @@ bool config_save() {
     memset(page, 0xff, sizeof(page));
     memcpy(page, &config, sizeof(Config));
 
-    const uint32_t interrupts = save_and_disable_interrupts();
-    flash_range_erase(CONFIG_FLASH_OFFSET, FLASH_SECTOR_SIZE);
-    flash_range_program(CONFIG_FLASH_OFFSET, page, sizeof(page));
-    restore_interrupts(interrupts);
+    const auto writer = [](void *data) {
+        flash_range_erase(CONFIG_FLASH_OFFSET, FLASH_SECTOR_SIZE);
+        flash_range_program(CONFIG_FLASH_OFFSET, static_cast<const uint8_t *>(data), FLASH_PAGE_SIZE);
+    };
+    if (flash_safe_execute(writer, page, 500) != PICO_OK) return false;
 
     Config verify{};
     memcpy(&verify, flash_config(), sizeof(verify));

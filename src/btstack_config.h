@@ -23,9 +23,6 @@
 #ifndef ENABLE_LE_SECURE_CONNECTIONS
 #define ENABLE_LE_SECURE_CONNECTIONS
 #endif
-#ifndef ENABLE_LE_PROACTIVE_AUTHENTICATION
-#define ENABLE_LE_PROACTIVE_AUTHENTICATION
-#endif
 #elif ENABLE_NS2PRO
 #ifndef ENABLE_BLE
 #define ENABLE_BLE
@@ -41,9 +38,6 @@
 #endif
 #ifndef ENABLE_LE_SECURE_CONNECTIONS
 #define ENABLE_LE_SECURE_CONNECTIONS
-#endif
-#ifndef ENABLE_LE_PROACTIVE_AUTHENTICATION
-#define ENABLE_LE_PROACTIVE_AUTHENTICATION
 #endif
 #else
 #ifndef ENABLE_CLASSIC
@@ -98,7 +92,7 @@
 
 // Logging
 #define ENABLE_PRINTF_HEXDUMP
-#define ENABLE_LOG_INFO
+#undef ENABLE_LOG_INFO // never emit Bluetooth key material via SDK info logs
 #define ENABLE_LOG_ERROR
 
 #endif

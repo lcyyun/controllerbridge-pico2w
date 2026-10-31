@@ -11,6 +11,8 @@ struct AutoUsbRuntime {
     BridgeUsbIdentity current;
     BridgeUsbIdentity requested;
     bool pending;
+    bool disconnected;
+    uint64_t requested_us;
     uint64_t last_switch_us;
 };
 
@@ -24,6 +26,10 @@ const char *identity_name(BridgeUsbIdentity identity) {
             return "sony_ds5";
         case BridgeUsbIdentity::NintendoSwitchPro:
             return "nintendo_switch_pro";
+        case BridgeUsbIdentity::SonyDsEdge:
+            return "sony_dsedge";
+        case BridgeUsbIdentity::XInput:
+            return "xinput";
         default:
             return "unknown";
     }
@@ -56,6 +62,7 @@ void auto_usb_request_identity(BridgeUsbIdentity identity, const char *reason) {
     }
     runtime.requested = identity;
     runtime.pending = true;
+    runtime.requested_us = time_us_64();
     printf("[AUTO USB] request identity=%s reason=%s\n",
            identity_name(identity),
            reason ? reason : "unknown");
@@ -66,11 +73,23 @@ void auto_usb_task() {
         return;
     }
 
-    tud_disconnect();
-    sleep_ms(250);
+    // Let the host finish reading the manager response before disconnecting.
+    // Never sleep here: this is the same cooperative loop as BTstack.
+    const uint64_t now = time_us_64();
+    if (!runtime.disconnected) {
+        if (now - runtime.requested_us < 100000u) return;
+        tud_disconnect();
+        runtime.disconnected = true;
+        runtime.last_switch_us = now;
+        return;
+    }
+    if (now - runtime.last_switch_us < 250000u) return;
     runtime.current = runtime.requested;
     runtime.last_switch_us = time_us_64();
     printf("[AUTO USB] re-enumerate identity=%s\n", identity_name(runtime.current));
     tud_connect();
     runtime.pending = false;
+    runtime.disconnected = false;
 }
+
+bool auto_usb_switch_pending() { return runtime.pending; }

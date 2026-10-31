@@ -30,4 +30,10 @@ void ns2_gatt_set_console_mac(const uint8_t mac[6]);
 uint8_t ns2_gatt_init_command_count();
 const Ns2InitCommand &ns2_gatt_init_command(uint8_t index);
 
+// Nintendo's vendor pairing protocol (SMP alone does not provision its LTK).
+size_t ns2_gatt_build_pair_command(uint8_t *out, size_t capacity, uint8_t subcommand,
+                                   const uint8_t *payload, size_t payload_len);
+bool ns2_gatt_parse_pair_response(const uint8_t *data, size_t len,
+                                  uint8_t subcommand, const uint8_t **payload);
+
 #endif

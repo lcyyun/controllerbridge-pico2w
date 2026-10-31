@@ -2,23 +2,26 @@
 
 [中文](README.CN.md)
 
-Standalone experimental Pico 2 W unified receiver firmware, prepared for the
-private repository `lcyyun/controllerbridge-pico2w`. This is a DS5Dongle-derived
+Standalone experimental Pico 2 W unified receiver firmware, maintained in the
+repository `lcyyun/controllerbridge-pico2w`. This is a DS5Dongle-derived
 implementation, not a clean-room rewrite. No sibling repository is needed to
 compile it. The Windows manager and its module/release packaging are separate.
 
 ## Firmware Scope
 
-- DualSense / DualSense Edge Bluetooth Classic and NS2Pro BLE input paths.
-- One active controller profile, with automatic selection and matching Sony
-  or Nintendo-style USB identity. The initial manager identity is not a gamepad.
-- Existing input, motion, rumble, DS5 audio/haptics and Feature Report `0x7f`
-  management code is retained. A successful build is not hardware validation
-  or a claim that every controller, console or audio mode is supported.
-- Pico 2 W is the initial build target. The inherited 320 MHz configuration
-  is an overclock and needs board-specific stability testing.
-- NS2-only is an optional, separately named image. Wake HID is unsupported:
-  the inherited `src/wake.cpp` is absent. No Pico W release is offered here.
+- Unified physical inputs: DualSense / DualSense Edge Bluetooth Classic and
+  NS2Pro BLE. `ENABLE_NS2PRO=OFF` selects the unified DS5-based entry point;
+  it does not exclude BLE when `ENABLE_AUTO_PROFILE=ON`.
+- Independently selectable DS5, Edge, XInput and NS2Pro USB outputs, full
+  per-physical-controller button mapping and persistent settings.
+- Physical fresh-frame telemetry, unknown-battery handling, stale neutralization,
+  asynchronous pairing/reconnect, rumble, Sony audio/haptics and NS2 HD feedback.
+- Default 150 MHz; `-ClockKHz 320000` retains the inherited **unvalidated**
+  overclock as an explicit opt-in. Hardware tests are still required.
+- Runtime API 2 `.cbmodule` includes the actual UF2 and two complete mapping
+  pages. See [parity, protocol and validation limits](docs/PARITY.md).
+- NS2-only remains an optional separate image, not the default. Host wake HID
+  is unsupported (`src/wake.cpp` is absent). No Pico W release is offered.
 
 ## Windows Build
 
@@ -31,9 +34,8 @@ powershell -ExecutionPolicy Bypass -File tools/build-windows.ps1 -Variant ns2pro
 ```
 
 The helper can install missing tools and fetch pinned SDK sources. Standalone
-script use clones this private repository into
-`%USERPROFILE%\.controllerbridge-pico2w-build\controllerbridge-pico2w`; authenticate
-Git separately. Existing cached project checkouts are never reset or pulled.
+script use clones this repository into
+`%USERPROFILE%\.controllerbridge-pico2w-build\controllerbridge-pico2w`; authenticate Git if required by your fork. Existing cached project checkouts are never reset or pulled.
 
 To use installed dependencies without installing tools or changing SDK checkouts,
 put the native host compiler, CMake, Ninja, Git and Python on `PATH`, then run:
@@ -60,7 +62,8 @@ copies only that build's `ds5-bridge.uf2` to:
 | `ns2pro` | `artifacts/ns2pro/ns2pro-bridge-pico2w.uf2` |
 
 It prints SHA-256 and never flashes or copies to a device/Desktop.
-Manager packaging owns any versioned module filename or compatibility alias.
+The firmware-owned `module/package.ps1` packages a completed UF2 under the
+versioned filename declared in `module/module.json`. It does not flash.
 
 ## Dependency Pins
 
@@ -72,6 +75,7 @@ Do not update these dependencies as part of the repository split.
 | TinyUSB override | `0.20.0`, `3af1bec1a9161ee8dec29487831f7ac7ade9e189` |
 | BTstack | `501e6d2b86e6c92bfb9c390bcf55709938e25ac1` |
 | cyw43-driver | `dd7568229f3bf7a37737b9e1ef250c26efe75b23` |
+| SDK lwIP (poll architecture target; no Wi-Fi runtime) | `77dcd25a72509eb83f72b033d219b1d40cd8eb95` |
 | ARM GNU | `14.2.rel1` (compiler reports `14.2.1`) |
 | Opus / WDL | Imported vendor snapshots in `lib/`, not submodules |
 

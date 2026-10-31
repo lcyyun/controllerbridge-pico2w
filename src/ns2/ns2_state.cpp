@@ -5,6 +5,7 @@
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
+#include "pico/flash.h"
 #include "pico/platform.h"
 #include "utils.h"
 
@@ -12,7 +13,7 @@ namespace {
 
 constexpr uint32_t NS2_CONFIG_MAGIC = 0x32534e50; // "PNS2" little-endian
 constexpr uint16_t NS2_CONFIG_VERSION = 1;
-constexpr uint32_t NS2_CONFIG_FLASH_OFFSET = PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE;
+constexpr uint32_t NS2_CONFIG_FLASH_OFFSET = PICO_FLASH_SIZE_BYTES - 4 * FLASH_SECTOR_SIZE;
 constexpr uint8_t CONFIG_FLAG_DISPLAY_DISABLED = 0x01;
 constexpr uint8_t CONFIG_FLAG_USB_RAW_DISABLED = 0x02;
 constexpr uint8_t CONFIG_FLAG_WEB_PARSE_DISABLED = 0x04;
@@ -172,8 +173,12 @@ void ns2_config_reset_defaults() {
 
 void ns2_config_load() {
     memcpy(&config, flash_config(), sizeof(config));
+    if (config.magic != NS2_CONFIG_MAGIC || !config_crc_valid(config)) {
+        const auto *legacy = reinterpret_cast<const Ns2ConfigBlock *>(XIP_BASE + PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE);
+        if (legacy->magic == NS2_CONFIG_MAGIC && legacy->version == NS2_CONFIG_VERSION && config_crc_valid(*legacy))
+            memcpy(&config, legacy, sizeof(config));
+    }
     validate_config();
-    config.body.auto_connect_enabled = 1;
 }
 
 bool ns2_config_save() {
@@ -185,10 +190,11 @@ bool ns2_config_save() {
     memset(page, 0xff, sizeof(page));
     memcpy(page, &config, sizeof(config));
 
-    const uint32_t interrupts = save_and_disable_interrupts();
-    flash_range_erase(NS2_CONFIG_FLASH_OFFSET, FLASH_SECTOR_SIZE);
-    flash_range_program(NS2_CONFIG_FLASH_OFFSET, page, sizeof(page));
-    restore_interrupts(interrupts);
+    const auto writer = [](void *data) {
+        flash_range_erase(NS2_CONFIG_FLASH_OFFSET, FLASH_SECTOR_SIZE);
+        flash_range_program(NS2_CONFIG_FLASH_OFFSET, static_cast<const uint8_t *>(data), FLASH_PAGE_SIZE);
+    };
+    if (flash_safe_execute(writer, page, 500) != PICO_OK) return false;
 
     Ns2ConfigBlock verify{};
     memcpy(&verify, flash_config(), sizeof(verify));

@@ -230,7 +230,7 @@ void serial_poll() {
 } // namespace
 
 int main() {
-    vreg_set_voltage(VREG_VOLTAGE_1_20);
+    vreg_set_voltage(SYS_CLOCK_KHZ > 150000 ? VREG_VOLTAGE_1_20 : VREG_VOLTAGE_1_10);
     sleep_ms(1000);
     set_sys_clock_khz(SYS_CLOCK_KHZ, true);
 

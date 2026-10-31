@@ -85,8 +85,16 @@ if (PICO_W_BUILD)
         set(SYS_CLOCK_KHZ_VALUE 200000)
         set(DISABLE_SPEAKER_PROC_VALUE 1)
 else ()
-        set(CYW43_PIO_CLOCK_DIV_VALUE 5)
-        set(SYS_CLOCK_KHZ_VALUE 320000)
+        set(BRIDGE_SYS_CLOCK_KHZ "150000" CACHE STRING "Pico 2 W system clock; 320000 is an unvalidated overclock")
+        if (BRIDGE_SYS_CLOCK_KHZ STREQUAL "320000")
+                set(CYW43_PIO_CLOCK_DIV_VALUE 5)
+                message(WARNING "320 MHz is an experimental overclock, not hardware-qualified")
+        elseif (BRIDGE_SYS_CLOCK_KHZ STREQUAL "150000")
+                set(CYW43_PIO_CLOCK_DIV_VALUE 3)
+        else ()
+                message(FATAL_ERROR "BRIDGE_SYS_CLOCK_KHZ must be 150000 or explicitly opt-in 320000")
+        endif ()
+        set(SYS_CLOCK_KHZ_VALUE ${BRIDGE_SYS_CLOCK_KHZ})
 endif ()
 
 
@@ -98,6 +106,9 @@ project(controllerbridge-pico2w C CXX ASM)
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
+if (NOT TARGET pico_cyw43_arch_poll)
+    message(FATAL_ERROR "Pico SDK lwIP submodule is required by SDK 2.2.0 to create the poll architecture: git -C <sdk> submodule update --init lib/lwip")
+endif ()
 
 # Add executable. Default name is the project name, version 0.1
 
@@ -126,6 +137,12 @@ else ()
         )
         if (ENABLE_AUTO_PROFILE)
                 target_sources(ds5-bridge PRIVATE
+                        src/bridge_runtime.cpp
+                        src/bridge_store.cpp
+                        src/xinput_usb.cpp
+                        src/bridge_features.cpp
+                        src/parity/bl616_bridge_protocol.c
+                        src/parity/bl616_bridge_mapping.c
                         src/profiles/auto_usb.cpp
                         src/profiles/auto_profile.cpp
                         src/ns2/ns2_ble.cpp
@@ -162,7 +179,7 @@ if (NOT ENABLE_NS2PRO)
         )
 endif ()
 
-target_compile_options(ds5-bridge PRIVATE -fsigned-char)
+target_compile_options(ds5-bridge PRIVATE -fsigned-char -fstack-usage)
 if (ENABLE_NS2PRO)
         set(PICO_STDIO_USB_DEFAULT_DESCRIPTORS_VALUE 0)
         set(PICO_STDIO_USB_ENABLED_VALUE 0)
@@ -175,8 +192,9 @@ target_compile_definitions(ds5-bridge PRIVATE
         ENABLE_SERIAL=${ENABLE_SERIAL_VALUE}
         ENABLE_NS2PRO=${ENABLE_NS2PRO_VALUE}
         ENABLE_AUTO_PROFILE=${ENABLE_AUTO_PROFILE_VALUE}
-        PICO_FLASH_ASSUME_CORE1_SAFE=1
+        PICO_FLASH_ASSUME_CORE1_SAFE=${ENABLE_NS2PRO_VALUE}
         PICO_FLASH_BANK_STORAGE_OFFSET=4182016u
+        PICO_STACK_SIZE=0x1000
         WDL_RESAMPLE_TYPE=float
         CYW43_PIO_CLOCK_DIV_INT=${CYW43_PIO_CLOCK_DIV_VALUE}
         PICO_STDIO_USB_USE_DEFAULT_DESCRIPTORS=${PICO_STDIO_USB_DEFAULT_DESCRIPTORS_VALUE}
@@ -230,6 +248,7 @@ if (ENABLE_NS2PRO)
                 pico_multicore
                 hardware_watchdog
                 hardware_timer
+                pico_flash
                 hardware_flash
                 hardware_spi
                 pico_btstack_ble
@@ -245,6 +264,7 @@ else ()
                 pico_multicore
                 hardware_watchdog
                 hardware_timer
+                pico_flash
                 hardware_flash
                 pico_btstack_classic
 #               pico_cyw43_arch_threadsafe_background

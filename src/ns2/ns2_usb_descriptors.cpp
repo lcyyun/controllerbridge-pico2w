@@ -1,4 +1,5 @@
 #include "ns2_usb_descriptors.h"
+#include "pico/unique_id.h"
 
 #include "ns2_usb.h"
 
@@ -102,9 +103,9 @@ const uint8_t desc_configuration_nintendo[] = {
 const char *string_desc[] = {
     "",
     "Nintendo Co., Ltd.",
-    "Nintendo Switch Pro Controller",
-    "HA2F83JF",
-    "Nintendo Switch Pro Controller",
+    "Pico 2 W NS2Pro Bridge",
+    "CBPICO2WNS2",
+    "Pico 2 W NS2Pro Bridge",
     "HID Interface",
     "",
     "Nintendo Switch 2 bulk",
@@ -227,6 +228,11 @@ uint16_t const *ns2_usb_descriptor_string_cb(uint8_t index, uint16_t langid) {
             return nullptr;
         }
         const char *str = string_desc[index];
+        static char board_serial[2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1];
+        if (index == STRID_SERIAL) {
+            pico_get_unique_board_id_string(board_serial,sizeof(board_serial));
+            str=board_serial;
+        }
         chr_count = strlen(str);
         const size_t max_count = sizeof(desc_str) / sizeof(desc_str[0]) - 1;
         if (chr_count > max_count) {

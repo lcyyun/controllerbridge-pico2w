@@ -1,4 +1,8 @@
 #include "ns2_usb.h"
+#include "bridge_ns2_audio_mixer.h"
+#if ENABLE_AUTO_PROFILE
+#include "bridge_runtime.h"
+#endif
 
 // Nintendo-style USB report mapping and HID OUT rumble forwarding are informed
 // by y700-switch2-pro-bridge protocol experiments and adapted for TinyUSB.
@@ -19,6 +23,8 @@
 #include "tusb.h"
 
 namespace {
+
+BridgeNs2AudioMixer audio_mixer;
 
 constexpr uint16_t REPORT_RATE_DEFAULT_HZ = 250;
 constexpr uint16_t REPORT_RATE_MIN_HZ = 60;
@@ -353,7 +359,7 @@ bool is_switch2_hid_rumble_report(const uint8_t *data, uint16_t len) {
            (data[1] & 0xf0) == 0x50;
 }
 
-void stop_hd_rumble() {
+void stop_regular_rumble() {
     build_zero_ble_vibration(usb.hd_left_vibration);
     build_zero_ble_vibration(usb.hd_right_vibration);
     usb.hd_stream_until_us = 0;
@@ -361,6 +367,17 @@ void stop_hd_rumble() {
     usb.hd_stop_packets_pending = usb.hd_stop_packets;
     usb.hd_stream_stops++;
     usb.hd_next_tick_us = 0;
+}
+
+void stop_audio_rumble() {
+    if (!audio_mixer.stop()) return;
+    usb.hd_stop_packets_pending = usb.hd_stop_packets;
+    usb.hd_next_tick_us = 0;
+}
+
+void stop_hd_rumble() {
+    stop_regular_rumble();
+    stop_audio_rumble();
 }
 
 void update_hd_rumble_stream(const uint8_t left[5], const uint8_t right[5], uint32_t hold_us, const char *reason) {
@@ -393,13 +410,17 @@ void bridge_hid_output_to_ble(const uint8_t *data, uint16_t len) {
             encode_ble_vibration_from_switch_frame(data, len, 0x12, right);
             update_hd_rumble_stream(left, right, usb.hd_hold_us, "hid-out");
         } else {
-            stop_hd_rumble();
+            stop_regular_rumble();
         }
     }
 }
 
 void hd_rumble_task() {
     const uint64_t now = time_us_64();
+    if (audio_mixer.expire(now)) {
+        usb.hd_stop_packets_pending = usb.hd_stop_packets;
+        usb.hd_next_tick_us = 0;
+    }
     if (usb.hd_next_tick_us != 0 && now < usb.hd_next_tick_us) {
         return;
     }
@@ -415,9 +436,8 @@ void hd_rumble_task() {
         usb.hd_stream_stops++;
     }
 
-    if (active) {
-        memcpy(left, usb.hd_left_vibration, sizeof(left));
-        memcpy(right, usb.hd_right_vibration, sizeof(right));
+    if (active || audio_mixer.active) {
+        audio_mixer.compose(active, usb.hd_left_vibration, usb.hd_right_vibration, left, right);
     } else if (usb.hd_stop_packets_pending > 0) {
         usb.hd_stop_packets_pending--;
         send_stop = true;
@@ -434,7 +454,8 @@ void hd_rumble_task() {
     } else {
         usb.hd_stream_errors++;
     }
-    usb.hd_next_tick_us = now + usb.hd_tick_us;
+    const uint32_t tick_us = audio_mixer.active && usb.hd_tick_us > 10000u ? 10000u : usb.hd_tick_us;
+    usb.hd_next_tick_us = now + tick_us;
 
     if (send_stop && usb.hd_stop_packets_pending == 0) {
         usb.hd_next_tick_us = now + usb.hd_tick_us;
@@ -542,8 +563,12 @@ bool send_report_now() {
 
     Ns2InputSnapshot input{};
     const bool live = live_input_snapshot(&input);
-    uint8_t report[NS2_USB_NINTENDO_REPORT_SIZE];
+    uint8_t report[NS2_USB_NINTENDO_REPORT_SIZE]{};
+#if ENABLE_AUTO_PROFILE
+    if (bridge_runtime_report(BL616_BRIDGE_ROLE_NS2PRO,report,sizeof(report),to_ms_since_boot(get_absolute_time()),ns2_config_usb_raw_passthrough_enabled()) != sizeof(report)) return false;
+#else
     make_nintendo_report(live ? &input : nullptr, report);
+#endif
     const uint32_t dedupe_hash = hash_nintendo_report_for_dedupe(report, sizeof(report));
 
     const bool ok = tud_hid_n_report(HID_INSTANCE,
@@ -1358,6 +1383,7 @@ uint16_t build_feature_report(uint8_t *buffer, uint16_t reqlen) {
 
 void ns2_usb_init() {
     memset(&usb, 0, sizeof(usb));
+    audio_mixer = {};
     set_usb_report_rate(ns2_config_report_rate_hz());
     usb.hd_enabled = ns2_config_rumble_enabled();
     usb.hd_scale_percent = ns2_config_rumble_scale_percent();
@@ -1370,6 +1396,32 @@ void ns2_usb_init() {
            static_cast<unsigned>(usb.report_rate_hz),
            ns2_config_usb_raw_passthrough_enabled() ? 1u : 0u);
 }
+
+void ns2_usb_set_motors(uint16_t left_amp, uint16_t right_amp) {
+    if (!left_amp && !right_amp) { stop_regular_rumble(); return; }
+    uint8_t left[5],right[5];
+    auto amplitude=[](uint16_t value) { return static_cast<uint16_t>(clamp_int(static_cast<uint32_t>(value)*1023u/65535u*usb.hd_scale_percent/HD_SCALE_DEFAULT_PERCENT,0,1023)); };
+    build_ble_vibration_data(0x0e1,false,amplitude(left_amp),0x1e1,false,amplitude(left_amp),left);
+    build_ble_vibration_data(0x0e1,false,amplitude(right_amp),0x1e1,false,amplitude(right_amp),right);
+    update_hd_rumble_stream(left,right,usb.hd_hold_us,"translated");
+}
+
+void ns2_usb_set_audio_motors(uint16_t left_amp, uint16_t right_amp) {
+    if (!usb.hd_enabled || (!left_amp && !right_amp)) { stop_audio_rumble(); return; }
+    uint8_t left[5], right[5];
+    auto amplitude=[](uint16_t value) { return static_cast<uint16_t>(clamp_int(static_cast<uint32_t>(value)*1023u/65535u*usb.hd_scale_percent/HD_SCALE_DEFAULT_PERCENT,0,1023)); };
+    build_ble_vibration_data(0x0e1,false,amplitude(left_amp),0x1e1,false,amplitude(left_amp),left);
+    build_ble_vibration_data(0x0e1,false,amplitude(right_amp),0x1e1,false,amplitude(right_amp),right);
+    const bool was_active = audio_mixer.active;
+    audio_mixer.submit(left, right, time_us_64());
+    if (was_active && !audio_mixer.active) usb.hd_stop_packets_pending = usb.hd_stop_packets;
+    usb.hd_next_tick_us = 0;
+}
+
+void ns2_usb_get_audio_stats(Ns2AudioStats *out) {
+    if (out) *out = {audio_mixer.active, audio_mixer.updates, audio_mixer.stops, audio_mixer.mixed_ticks};
+}
+void ns2_usb_feedback_task() { hd_rumble_task(); }
 
 void ns2_usb_task() {
     flush_vendor_reply();
@@ -1415,7 +1467,7 @@ void ns2_usb_get_stats(Ns2UsbStats *out) {
     out->vendor_last_tx_len = usb.vendor_last_tx_len;
     out->vendor_last_cmd = usb.vendor_last_cmd;
     out->vendor_last_arg = usb.vendor_last_arg;
-    out->rumble_active = usb.hd_stream_active;
+    out->rumble_active = usb.hd_stream_active || audio_mixer.active;
     out->rumble_updates = usb.hd_stream_updates;
     out->rumble_writes = usb.hd_stream_writes;
     out->rumble_stops = usb.hd_stream_stops;
@@ -1484,6 +1536,7 @@ void ns2_usb_mount_cb() {
 }
 
 void ns2_usb_umount_cb() {
+    stop_hd_rumble();
     usb.mounted = false;
     usb.suspended = false;
     usb.pending_len = 0;
@@ -1493,6 +1546,7 @@ void ns2_usb_umount_cb() {
 
 void ns2_usb_suspend_cb(bool remote_wakeup_en) {
     (void)remote_wakeup_en;
+    stop_hd_rumble();
     usb.suspended = true;
     printf("[NS2 USB] suspended\n");
 }

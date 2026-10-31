@@ -1,19 +1,32 @@
+# Pico 2 W 统一接收器测试版
+
+本轮实现、协议与硬件验证边界见 [PARITY.md](docs/PARITY.md)。
+默认 unified 同时包含 DualSense/Edge Classic 与 NS2Pro BLE，物理输入独立于
+DualSense、Edge、XInput、NS2Pro 四种 USB 输出身份。映射按两类物理手柄分别保存，
+包含扩展键；报告率使用物理序号/时间戳，断线及过期会清空输入，未知电量明确显示未知。
+
+默认使用 150 MHz。继承的 320 MHz 仅作为显式 `-ClockKHz 320000` 构建选项，
+没有板级稳定性证明。固件构建、离线测试与实物验证分开记录；编译成功不等于已实测。
+不要把用于 BL616 调试的 RP2350 串口桥刷成此接收器。
+
+完整构建与依赖版本说明见 [README](README.md)。
+
 # ControllerBridge Pico 2 W
 
 [English](README.md)
 
-面向私有仓库 `lcyyun/controllerbridge-pico2w` 的独立 Pico 2 W 实验性统一接收器固件。
+仓库 `lcyyun/controllerbridge-pico2w` 的独立 Pico 2 W 实验性统一接收器固件。
 本项目基于 DS5Dongle，并非从零重写。构建不依赖相邻仓库；Windows 管理器及固件模块、
 发布包的打包约定由独立项目维护。
 
 ## 功能与边界
 
 - 保留 DualSense / DualSense Edge Bluetooth Classic 和 NS2Pro BLE 输入路径。
-- 一次激活一个手柄配置，自动选择并切换为对应 Sony 或 Nintendo 风格 USB 身份；
-  初始管理身份不是游戏手柄。
+- 一次选择一个物理输入源；USB 身份独立选择 DS5、Edge、XInput 或 NS2Pro，
+  默认 DS5；两类物理输入各自保存 25 键映射。
 - 保留输入、运动传感器、震动、DS5 音频/触觉和 Feature Report `0x7f` 管理代码。
   编译通过不等于硬件验证，也不保证所有手柄、主机或音频模式均兼容。
-- 初始目标为 Pico 2 W。继承的 320 MHz 配置属于超频，需要逐板验证稳定性。
+- 默认 Pico 2 W 使用 150 MHz；显式选用 320 MHz 属于超频，需要逐板验证稳定性。
 - NS2-only 是可选的独立镜像。Wake HID 不受支持，原有 `src/wake.cpp` 缺失；
   本仓库暂不提供 Pico W 发布配置。
 
@@ -27,7 +40,7 @@ powershell -ExecutionPolicy Bypass -File tools/build-windows.ps1
 powershell -ExecutionPolicy Bypass -File tools/build-windows.ps1 -Variant ns2pro
 ```
 
-脚本可安装缺失工具并获取固定版本的 SDK。单独下载脚本运行时，会将私有仓库克隆到
+脚本可安装缺失工具并获取固定版本的 SDK。单独下载脚本运行时，会将仓库克隆到
 `%USERPROFILE%\.controllerbridge-pico2w-build\controllerbridge-pico2w`；
 Git 认证需自行配置。已有缓存源码不会被自动 reset 或 pull。
 

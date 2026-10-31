@@ -13,6 +13,8 @@ enum class BridgeUsbIdentity : uint8_t {
     DebugOnly = 0,
     SonyDs5 = 1,
     NintendoSwitchPro = 2,
+    SonyDsEdge = 3,
+    XInput = 4,
 };
 
 enum class BridgeInputTransport : uint8_t {
@@ -34,9 +36,8 @@ struct BridgeProfileDescriptor {
     bool preserves_ds5_fast_path;
 };
 
-// Stage 1 profile contract. This is intentionally not wired into the firmware
-// yet; it records the boundary for the later migration without changing the
-// DS5Dongle hot path.
+// Physical input profiles and USB output identities are independent. A profile
+// selects the wireless protocol; the persisted output role selects USB codecs.
 struct BridgeProfile {
     BridgeProfileDescriptor descriptor;
     void (*init)();

@@ -1,32 +1,126 @@
 {
   "schemaVersion": 1,
-  "runtimeApiVersion": 1,
+  "runtimeApiVersion": 2,
   "id": "pico-unified-bridge",
-  "moduleVersion": "0.1.0",
+  "moduleVersion": "0.2.0-preview.1",
   "displayName": "Pico 2 W Controller Bridge",
   "boardFamily": "Raspberry Pi Pico 2 W",
-  "description": "Pico 2 W 上统一接收 DS5 与 NS2Pro，并切换对应 USB 身份。",
+  "description": "Pico 2 W 通过 Classic 接收 DualSense/Edge、通过 BLE 接收 NS2Pro，独立选择四种 USB 输出身份。",
   "priority": 90,
   "capabilities": "DeviceStatus, LiveInput, UsbRoleSelection, InputSourceSelection, WirelessControllers, Rumble, UsbAudio, Motion, Settings, SelfTest, RawCommands, FirmwareFlashing",
   "matchAny": [
-    { "profileKeys": ["pico-auto-manager"] }
+    {
+      "profileKeys": [
+        "pico-auto-manager",
+        "pico-dualsense",
+        "pico-dualsense-edge",
+        "pico-xinput",
+        "pico-ns2pro",
+        "pico-ns2pro-legacy"
+      ]
+    }
   ],
   "hidDevices": [
     {
-      "key": "pico-auto-manager", "displayName": "Pico 2 W Controller Bridge Manager",
-      "vendorId": 51966, "productId": 16402,
-      "managerUsagePage": 65280, "managerUsageId": 1,
-      "managerFeatureReportId": 127, "usbRole": "Unknown",
-      "tags": ["pico2w", "unified", "ds5", "ns2pro"],
+      "key": "pico-auto-manager",
+      "displayName": "Pico 2 W Controller Bridge Manager",
+      "vendorId": 51966,
+      "productId": 16402,
+      "managerUsagePage": 65280,
+      "managerUsageId": 1,
+      "managerFeatureReportId": 127,
+      "usbRole": "Unknown",
+      "tags": [
+        "pico2w",
+        "unified",
+        "ds5",
+        "ns2pro"
+      ],
       "supportsInputReports": true
     },
     {
-      "key": "pico-dualsense", "displayName": "Pico 2 W DualSense Manager",
-      "vendorId": 1356, "productId": 3302,
-      "managerUsagePage": 1, "managerUsageId": 5,
-      "managerFeatureReportId": 246, "usbRole": "DualSense",
+      "key": "pico-dualsense",
+      "displayName": "Pico 2 W DualSense Manager",
+      "vendorId": 1356,
+      "productId": 3302,
+      "managerUsagePage": 1,
+      "managerUsageId": 5,
+      "managerFeatureReportId": 127,
+      "usbRole": "DualSense",
       "legacyManagerProductName": "Pico 2 W DualSense HID",
-      "tags": ["pico2w", "ds5", "dualsense"],
+      "tags": [
+        "pico2w",
+        "ds5",
+        "dualsense"
+      ],
+      "supportsInputReports": true
+    },
+    {
+      "key": "pico-dualsense-edge",
+      "displayName": "Pico 2 W DualSense Edge Manager",
+      "vendorId": 1356,
+      "productId": 3570,
+      "managerUsagePage": 1,
+      "managerUsageId": 5,
+      "managerFeatureReportId": 127,
+      "usbRole": "DualSenseEdge",
+      "legacyManagerProductName": "Pico 2 W DualSense Edge HID",
+      "tags": [
+        "pico2w",
+        "ds5",
+        "dse"
+      ],
+      "supportsInputReports": true
+    },
+    {
+      "key": "pico-xinput",
+      "displayName": "Pico 2 W XInput Manager",
+      "vendorId": 51966,
+      "productId": 16403,
+      "managerUsagePage": 65280,
+      "managerUsageId": 1,
+      "managerFeatureReportId": 127,
+      "usbRole": "Xbox",
+      "legacyManagerProductName": "Pico 2 W XInput Bridge",
+      "tags": [
+        "pico2w",
+        "xinput",
+        "development-preview"
+      ],
+      "supportsInputReports": false
+    },
+    {
+      "key": "pico-ns2pro",
+      "displayName": "Pico 2 W NS2Pro Manager",
+      "vendorId": 1406,
+      "productId": 8297,
+      "managerUsagePage": 65280,
+      "managerUsageId": 1,
+      "managerFeatureReportId": 127,
+      "commandOutputReportId": 2,
+      "usbRole": "NintendoNs2Pro",
+      "legacyManagerProductName": "Pico 2 W NS2Pro Bridge",
+      "tags": [
+        "pico2w",
+        "ns2pro"
+      ],
+      "supportsInputReports": true
+    },
+    {
+      "key": "pico-ns2pro-legacy",
+      "displayName": "Pico 2 W NS2Pro Legacy Manager",
+      "vendorId": 1406,
+      "productId": 8297,
+      "managerUsagePage": 65280,
+      "managerUsageId": 1,
+      "managerFeatureReportId": 127,
+      "commandOutputReportId": 2,
+      "usbRole": "NintendoNs2Pro",
+      "managerSerialNumber": "HA2F83JF",
+      "tags": [
+        "pico2w",
+        "ns2pro"
+      ],
       "supportsInputReports": true
     }
   ],
@@ -42,27 +136,66 @@
     {
       "id": "pico-unified-current",
       "displayName": "Pico 2 W Controller Bridge",
-      "version": "0.1.0",
-      "description": "自动识别 DualSense/NS2Pro，并切换对应 USB 身份。",
-      "boardIds": ["pico-2-w"],
+      "version": "0.2.0-preview.1",
+      "description": "预览固件：四种 USB 输出、独立物理输入映射、真实源帧遥测与唤醒回连。实机回归待完成。",
+      "boardIds": [
+        "pico-2-w"
+      ],
       "flashMethod": "PicoUf2",
-      "artifactRelativePath": "artifacts/pico-controller-bridge-0.1.uf2",
-      "flashHint": "按住 BOOTSEL 接入电脑，然后将 UF2 写入 RPI-RP2 盘。"
+      "artifactRelativePath": "artifacts/controllerbridge-pico2w-unified-0.2.0-preview.1.uf2",
+      "flashHint": "按住 BOOTSEL 连接真正的 Pico 2 W 接收器，将 UF2 写入其启动盘；不要误选调试串口桥。"
     }
   ],
   "usbRoles": [
-    { "role": "DualSense", "displayName": "DualSense / DS5", "description": "Sony HID 身份", "command": "role set ds5" },
-    { "role": "NintendoNs2Pro", "displayName": "Nintendo NS2Pro", "description": "原生 Nintendo 身份", "command": "role set ns2pro" }
+    {
+      "role": "DualSense",
+      "displayName": "DualSense",
+      "description": "Sony HID、音频与触觉",
+      "command": "role set ds5"
+    },
+    {
+      "role": "DualSenseEdge",
+      "displayName": "DualSense Edge",
+      "description": "Sony Edge HID",
+      "command": "role set dse"
+    },
+    {
+      "role": "Xbox",
+      "displayName": "XInput",
+      "description": "XUSB 与独立管理 HID；测试 USB ID",
+      "command": "role set xbox"
+    },
+    {
+      "role": "NintendoNs2Pro",
+      "displayName": "Nintendo NS2Pro",
+      "description": "Nintendo HID",
+      "command": "role set ns2pro"
+    }
   ],
   "inputSources": [
-    { "preference": "Auto", "displayName": "自动选择", "description": "优先使用已连接控制器", "command": "input set auto" },
-    { "preference": "DualSense", "displayName": "仅使用 DualSense", "description": "Bluetooth Classic HID", "command": "input set ds5" },
-    { "preference": "NintendoNs2Pro", "displayName": "仅使用 NS2Pro", "description": "Bluetooth LE", "command": "input set ns2pro" }
+    {
+      "preference": "Auto",
+      "displayName": "自动选择",
+      "description": "优先使用已连接控制器",
+      "command": "input set auto"
+    },
+    {
+      "preference": "DualSense",
+      "displayName": "仅使用 DualSense",
+      "description": "Bluetooth Classic HID",
+      "command": "input set ds5"
+    },
+    {
+      "preference": "NintendoNs2Pro",
+      "displayName": "仅使用 NS2Pro",
+      "description": "Bluetooth LE",
+      "command": "input set ns2pro"
+    }
   ],
   "wirelessControllers": [
     {
       "id": "ds5",
-      "displayName": "DualSense / DS5",
+      "displayName": "DualSense / DualSense Edge",
       "transportLabel": "Bluetooth Classic",
       "pairCommand": "ds5 pair",
       "connectCommand": "ds5 reconnect",
@@ -79,8 +212,17 @@
       "forgetCommand": "ns2 forget"
     }
   ],
-  "statusCommands": ["status", "usb status"],
-  "selfTestCommands": ["status", "usb status", "input status", "motion status", "ds5 status"],
+  "statusCommands": [
+    "status",
+    "usb status"
+  ],
+  "selfTestCommands": [
+    "status",
+    "usb status",
+    "input status",
+    "motion status",
+    "ds5 status"
+  ],
   "primaryStatusCommand": "status",
   "inputStatusCommand": "input status",
   "saveSettingsCommand": "settings save",
@@ -90,5 +232,149 @@
     "usb raw {usbRaw}",
     "web parse {liveParsing}"
   ],
-  "rumbleCommandTemplate": "rumble test {target}"
+  "rumbleCommandTemplate": "rumble test {target}",
+  "operations": {
+    "mapping.read": {
+      "transport": "ManagerCommand",
+      "request": "mapping get {profile}"
+    },
+    "mapping.set": {
+      "transport": "ManagerCommand",
+      "request": "mapping set {profile} {target} {source}"
+    },
+    "mapping.reset": {
+      "transport": "ManagerCommand",
+      "request": "mapping reset {profile}"
+    },
+    "mapping.save": {
+      "transport": "ManagerCommand",
+      "request": "mapping save {profile}"
+    },
+    "settings.reset": {
+      "transport": "ManagerCommand",
+      "request": "settings reset"
+    },
+    "system.bootloader": {
+      "transport": "ManagerCommand",
+      "request": "bootsel"
+    },
+    "settings.save": {
+      "transport": "ManagerCommand",
+      "request": "settings save"
+    },
+    "settings.read": {
+      "transport": "ManagerCommand",
+      "request": "settings"
+    },
+    "system.reboot": {
+      "transport": "ManagerCommand",
+      "request": "reboot"
+    }
+  },
+  "pages": [
+    {
+      "id": "pico-ds5-mapping",
+      "label": "DualSense / DualSense Edge 映射",
+      "description": "按输入手柄保存，适用于该手柄的所有 USB 输出身份。",
+      "icon": "Game",
+      "sections": [
+        {
+          "id": "ds5-buttons",
+          "label": "按键映射",
+          "controls": [
+            {
+              "id": "pico-ds5-button-map",
+              "type": "MappingEditor",
+              "label": "DualSense / DualSense Edge 按键来源",
+              "binding": "/entries",
+              "mappingProfile": "ds5",
+              "sourceCatalog": "controller.inputControls",
+              "targetCatalog": "bridge.outputControls",
+              "readAction": "mapping.read",
+              "applyAction": "mapping.set",
+              "resetAction": "mapping.reset",
+              "saveAction": "mapping.save"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "pico-ns2pro-mapping",
+      "label": "Nintendo NS2Pro 映射",
+      "description": "按输入手柄保存，适用于该手柄的所有 USB 输出身份。",
+      "icon": "Game",
+      "sections": [
+        {
+          "id": "ns2pro-buttons",
+          "label": "按键映射",
+          "controls": [
+            {
+              "id": "pico-ns2pro-button-map",
+              "type": "MappingEditor",
+              "label": "Nintendo NS2Pro 按键来源",
+              "binding": "/entries",
+              "mappingProfile": "ns2pro",
+              "sourceCatalog": "controller.inputControls",
+              "targetCatalog": "bridge.outputControls",
+              "readAction": "mapping.read",
+              "applyAction": "mapping.set",
+              "resetAction": "mapping.reset",
+              "saveAction": "mapping.save"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "pico-recovery",
+      "label": "配置与恢复",
+      "description": "先保存需要保留的配置。恢复默认不会改变固件；进入 BOOTSEL 后 USB 将断开，可通过 UF2 更新。",
+      "icon": "Settings",
+      "sections": [
+        {
+          "id": "pico-settings",
+          "label": "配置",
+          "controls": [
+            {
+              "id": "pico-read-settings",
+              "type": "ActionButton",
+              "label": "读取配置",
+              "applyAction": "settings.read"
+            },
+            {
+              "id": "pico-save-settings",
+              "type": "ActionButton",
+              "label": "保存配置",
+              "applyAction": "settings.save"
+            },
+            {
+              "id": "pico-reset-settings",
+              "type": "ActionButton",
+              "label": "恢复默认配置",
+              "applyAction": "settings.reset"
+            }
+          ]
+        },
+        {
+          "id": "pico-system",
+          "label": "接收器",
+          "controls": [
+            {
+              "id": "pico-reboot",
+              "type": "ActionButton",
+              "label": "重启接收器",
+              "applyAction": "system.reboot"
+            },
+            {
+              "id": "pico-bootsel",
+              "type": "ActionButton",
+              "label": "进入 BOOTSEL 更新模式",
+              "applyAction": "system.bootloader"
+            }
+          ]
+        }
+      ]
+    }
+  ]
 }

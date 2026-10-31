@@ -123,3 +123,20 @@ This project is not affiliated with, endorsed by, or sponsored by Nintendo,
 Sony, Valve, Raspberry Pi, or any other hardware/software vendor. Nintendo
 Switch, Switch Pro Controller, DualSense, Steam, Raspberry Pi, and related
 names are trademarks of their respective owners.
+
+
+## Pico unified parity preview additions
+
+The portable bridge codecs and 25-control, per-input mapping under `src/parity`
+were ported from the local ControllerBridge BL616 implementation (MIT ancestry;
+see `LICENSES/BL616-protocol-MIT.txt`). NS2 pairing follows the same protocol
+research already attributed to y700-switch2-pro-bridge; no sibling repository
+is needed at build time. Pico-specific asynchronous lifecycle, USB class,
+telemetry, persistence and audio adaptation are maintained in this repository.
+
+Release packages retain the Pico SDK BSD license, the Raspberry Pi-specific
+BTstack and CYW43 permissions, upstream BTstack/CYW43 notices, TinyUSB MIT,
+CMSIS Apache-2.0, pico_printf MIT and the vendored Opus COPYING text. WDL
+source-level license terms remain in lib/WDL. Use is intended for Raspberry Pi
+Pico 2 W hardware; the RP-specific wireless license grants are not a general
+license to redistribute those wireless components on unrelated hardware.

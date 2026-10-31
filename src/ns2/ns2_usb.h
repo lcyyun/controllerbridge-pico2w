@@ -49,6 +49,12 @@ struct Ns2UsbStats {
 
 void ns2_usb_init();
 void ns2_usb_task();
+void ns2_usb_feedback_task();
+void ns2_usb_set_motors(uint16_t left, uint16_t right);
+// Separate PCM envelope source; zero stops audio without clearing game rumble.
+void ns2_usb_set_audio_motors(uint16_t left, uint16_t right);
+struct Ns2AudioStats { bool active; uint32_t updates, stops, mixed_ticks; };
+void ns2_usb_get_audio_stats(Ns2AudioStats *out);
 void ns2_usb_get_stats(Ns2UsbStats *out);
 bool ns2_usb_handle_debug_command(const char *line, char *out, size_t out_len);
 

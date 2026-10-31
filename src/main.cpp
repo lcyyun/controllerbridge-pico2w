@@ -13,6 +13,7 @@
 #include "hardware/clocks.h"
 #include "hardware/vreg.h"
 #include "hardware/watchdog.h"
+#include "hardware/sync.h"
 #include "pico/bootrom.h"
 #include "pico/error.h"
 #include "pico/stdlib.h"
@@ -29,6 +30,9 @@
 #endif
 #if ENABLE_AUTO_PROFILE
 #include "profiles/auto_usb.h"
+#include "bridge_runtime.h"
+#include "xinput_usb.h"
+#include "bridge_features.h"
 #include "profiles/auto_profile.h"
 #include "ns2/ns2_ble.h"
 #include "ns2/ns2_input.h"
@@ -63,10 +67,15 @@ static bool profile_lock_applied = false;
 static char auto_line_buffer[160];
 static size_t auto_line_len = 0;
 static bool auto_manager_bootrom_requested = false;
+static bool auto_manager_reboot_requested = false;
+static bool auto_manager_command_pending = false;
+static bool output_processing = false, output_pending = false;
+static uint8_t output_itf, output_id, output_type, output_size, output_bytes[80];
+static uint32_t feedback_stop_ms = 0;
 
 constexpr uint8_t AUTO_MANAGER_FEATURE_REPORT_ID = 0x7f;
 constexpr size_t AUTO_MANAGER_FEATURE_REPORT_SIZE = 64;
-constexpr size_t AUTO_MANAGER_REPLY_MAX = 1024;
+constexpr size_t AUTO_MANAGER_REPLY_MAX = 4096;
 constexpr char AUTO_MANAGER_SET_MAGIC[] = "Y7HID1";
 constexpr char AUTO_MANAGER_REPLY_MAGIC[] = "Y7HRS1";
 
@@ -82,80 +91,14 @@ struct AutoManagerFeatureRuntime {
 
 static AutoManagerFeatureRuntime auto_manager{};
 
-struct ReportRateTracker {
-    uint32_t raw_total;
-    uint32_t unique_total;
-    uint32_t raw_window;
-    uint32_t unique_window;
-    uint32_t raw_hz;
-    uint32_t unique_hz;
-    uint32_t last_hash;
-    bool has_hash;
-    uint64_t window_start_us;
-};
-
-static ReportRateTracker ds5_usb_rate{};
-static uint32_t ds5_usb_failed = 0;
-
-static uint32_t fnv1a32_update(uint32_t hash, const uint8_t *data, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        hash ^= data[i];
-        hash *= 16777619u;
-    }
-    return hash;
-}
-
-static uint32_t hash_bytes(const uint8_t *data, size_t len) {
-    return fnv1a32_update(2166136261u, data, len);
-}
-
-static uint32_t hash_ds5_report_for_dedupe(const uint8_t *data, size_t len) {
-    if (!data || len == 0) {
-        return 0;
-    }
-    uint8_t copy[63];
-    const size_t copy_len = len < sizeof(copy) ? len : sizeof(copy);
-    memcpy(copy, data, copy_len);
-    if (copy_len > 6) {
-        copy[6] = 0; // sequence/timing byte should not make a duplicate report unique.
-    }
-    return hash_bytes(copy, copy_len);
-}
-
-static void report_rate_note(ReportRateTracker *tracker, uint32_t hash) {
-    if (!tracker) {
-        return;
-    }
-    const uint64_t now = time_us_64();
-    if (tracker->window_start_us == 0) {
-        tracker->window_start_us = now;
-    }
-
-    tracker->raw_total++;
-    tracker->raw_window++;
-    if (!tracker->has_hash || tracker->last_hash != hash) {
-        tracker->has_hash = true;
-        tracker->last_hash = hash;
-        tracker->unique_total++;
-        tracker->unique_window++;
-    }
-
-    const uint64_t elapsed = now - tracker->window_start_us;
-    if (elapsed >= 1000000u) {
-        tracker->raw_hz = static_cast<uint32_t>((static_cast<uint64_t>(tracker->raw_window) * 1000000u + elapsed / 2u) / elapsed);
-        tracker->unique_hz = static_cast<uint32_t>((static_cast<uint64_t>(tracker->unique_window) * 1000000u + elapsed / 2u) / elapsed);
-        tracker->raw_window = 0;
-        tracker->unique_window = 0;
-        tracker->window_start_us = now;
-    }
-}
+static uint32_t ds5_usb_sent = 0, ds5_usb_failed = 0;
 
 static bool auto_usb_is_nintendo() {
     return auto_usb_identity() == BridgeUsbIdentity::NintendoSwitchPro;
 }
 
 static bool auto_usb_is_sony_ds5() {
-    return auto_usb_identity() == BridgeUsbIdentity::SonyDs5;
+    return auto_usb_identity() == BridgeUsbIdentity::SonyDs5 || auto_usb_identity() == BridgeUsbIdentity::SonyDsEdge;
 }
 
 static bool auto_usb_is_debug_only() {
@@ -180,9 +123,13 @@ static void reset_auto_session(const char *reason) {
     printf("[AUTO] session ended; return to detect reason=%s\n", reason ? reason : "unknown");
     profile_lock_applied = false;
     auto_profile_reset_detection(reason);
-    bt_set_classic_enabled(true);
-    ns2_ble_resume_auto();
-    auto_usb_request_identity(BridgeUsbIdentity::DebugOnly, reason);
+    bridge_runtime_reset_input();
+    ns2_usb_set_motors(0, 0);
+    output_pending = false; feedback_stop_ms = 0;
+    state_init();
+    audio_reset_session(false);
+    bt_set_classic_enabled(bridge_runtime_preference() != 2);
+    if (bridge_runtime_preference() != 1) ns2_ble_resume_auto();
 }
 
 static void apply_profile_lock_actions() {
@@ -194,13 +141,13 @@ static void apply_profile_lock_actions() {
     if (auto_profile_active() == BridgeProfileId::Ds5FastPath) {
         printf("[AUTO] apply DS5 fast path; suspend NS2 BLE\n");
         ns2_ble_suspend_auto();
-        auto_usb_request_identity(BridgeUsbIdentity::SonyDs5, "ds5_profile_locked");
+
         return;
     }
 
     printf("[AUTO] apply NS2 compatibility path; disable BT Classic\n");
     bt_set_classic_enabled(false);
-    auto_usb_request_identity(BridgeUsbIdentity::NintendoSwitchPro, "ns2_profile_locked");
+
 }
 
 static void auto_session_tick() {
@@ -212,10 +159,10 @@ static void auto_session_tick() {
 }
 
 static void on_ns2_input_auto(const Ns2InputSnapshot *snapshot) {
-    if (!auto_profile_note_ns2_input(snapshot)) {
+    if (!bridge_runtime_accepts(2) || !auto_profile_note_ns2_input(snapshot)) {
         return;
     }
-    apply_profile_lock_actions();
+    bridge_runtime_ns2(snapshot, to_ms_since_boot(get_absolute_time()));
 }
 
 static const char *skip_spaces(const char *s) {
@@ -312,9 +259,7 @@ static void handle_ds5_command_json(const char *line, char *out, size_t out_len)
     if (strcmp(line, "ds5 usb reconnect") == 0 ||
         strcmp(line, "ds5 reconnect usb") == 0 ||
         strcmp(line, "reconnect usb") == 0) {
-        tud_disconnect();
-        sleep_ms(150);
-        tud_connect();
+        auto_usb_request_identity(auto_usb_identity(), "manager_reconnect");
         snprintf(out, out_len, "{\"ok\":true,\"profile\":\"ds5\",\"action\":\"usb_reconnect\"}");
         return;
     }
@@ -361,202 +306,135 @@ static void handle_ds5_command_json(const char *line, char *out, size_t out_len)
 }
 
 static void format_auto_status_json(char *out, size_t out_len) {
-    char ns2_json[512];
-    ns2_status_format_json(ns2_json, sizeof(ns2_json));
-    snprintf(out,
-             out_len,
-             "{\"ok\":true,\"profile\":\"auto\",\"active\":\"%s\",\"locked\":%s,"
-             "\"usb\":\"%s\",\"bt_classic_connected\":%s,\"ns2_connected\":%s,"
-             "\"ds5_reports\":%lu,\"ns2_reports\":%lu,\"manager_sets\":%lu,"
-             "\"manager_gets\":%lu,\"ns2\":%s}",
-             auto_profile_active_name(),
-             auto_profile_locked() ? "true" : "false",
-             auto_usb_identity_name(),
-             bt_classic_connected() ? "true" : "false",
-             ns2_ble_connected() ? "true" : "false",
-             static_cast<unsigned long>(auto_profile_ds5_reports()),
-             static_cast<unsigned long>(auto_profile_ns2_reports()),
-             static_cast<unsigned long>(auto_manager.set_count),
-             static_cast<unsigned long>(auto_manager.get_count),
-             ns2_json);
+    bridge_runtime_status(out, out_len, to_ms_since_boot(get_absolute_time()));
+    const size_t len = strlen(out);
+    const char *role = auto_usb_identity() == BridgeUsbIdentity::SonyDs5 ? "ds5" :
+        auto_usb_identity() == BridgeUsbIdentity::SonyDsEdge ? "dse" :
+        auto_usb_identity() == BridgeUsbIdentity::XInput ? "xbox" :
+        auto_usb_identity() == BridgeUsbIdentity::NintendoSwitchPro ? "ns2pro" : "unknown";
+    AudioMicStats mic{}; audio_mic_get_stats(&mic);
+    AudioStats audio{}; audio_get_stats(&audio);
+    if (len && out[len - 1] == '}') {
+        snprintf(out + len - 1, out_len - len + 1,
+                 ",\"firmware\":\"%s\",\"role\":\"%s\",\"usb_role\":\"%s\",\"input_preference\":\"%s\","
+                 "\"ds5_connected\":%s,\"ds5_saved\":%s,\"ds5_pairing\":%s,\"ns2_connected\":%s,\"ns2_saved\":%s,\"ns2_scanning\":%s,"
+                 "\"usb_mounted\":%s,\"mounted\":%s,\"suspended\":%s,\"report_rate_hz\":%u,\"sys_clock_khz\":%lu,"
+                 "\"rumble_enabled\":%s,\"rumble_scale_percent\":%u,\"rumble_hold_ms\":%u,\"rumble_tick_ms\":%u,\"rumble_stop_packets\":%u,"
+                 "\"usb_raw_passthrough\":%s,\"web_parse_reports\":%s,"
+                 "\"mic_enabled\":%s,\"mic_received\":%lu,\"mic_dropped\":%lu,\"mic_decode_errors\":%lu,"
+                 "\"audio_capable\":%s,\"audio_speaker_open\":%s,\"audio_mic_open\":%s,\"audio_ns2_active\":%s,"
+                 "\"audio_out_packets\":%lu,\"audio_out_bytes\":%lu,\"audio_out_errors\":%lu,"
+                 "\"audio_in_packets\":%lu,\"audio_in_bytes\":%lu,\"audio_in_errors\":%lu,"
+                 "\"audio_bt_reports\":%lu,\"audio_bt_dropped\":%lu,\"audio_opus_errors\":%lu,"
+                 "\"audio_haptic_blocks\":%lu,\"audio_ns2_updates\":%lu,\"audio_ns2_stops\":%lu,\"audio_ns2_mixed_ticks\":%lu}",
+                 PICO_PROGRAM_VERSION_STRING, role, role,
+                 bridge_runtime_preference() == 1 ? "ds5" : bridge_runtime_preference() == 2 ? "ns2pro" : "auto",
+                 bt_classic_connected() ? "true" : "false", bt_has_saved_peer() ? "true" : "false", bt_pairing_active() ? "true" : "false",
+                 ns2_ble_connected() ? "true" : "false", ns2_config_has_saved_target() ? "true" : "false",
+                 ns2_status_get_state() == Ns2BleState::Scanning ? "true" : "false", tud_mounted() ? "true" : "false",
+                 tud_mounted() ? "true":"false", tud_suspended() ? "true":"false", ns2_config_report_rate_hz(), (unsigned long)SYS_CLOCK_KHZ,
+                 ns2_config_rumble_enabled() ? "true":"false", ns2_config_rumble_scale_percent(), ns2_config_rumble_hold_ms(),
+                 ns2_config_rumble_tick_ms(), ns2_config_rumble_stop_packets(), ns2_config_usb_raw_passthrough_enabled() ? "true":"false",
+                 ns2_config_web_parse_reports_enabled() ? "true":"false", mic.enabled ? "true" : "false",
+                 (unsigned long)mic.received,(unsigned long)mic.dropped,(unsigned long)mic.decode_errors,
+                 auto_usb_is_sony_ds5() ? "true":"false", audio.speaker_open ? "true":"false",
+                 audio.mic_open ? "true":"false", audio.ns2_active ? "true":"false",
+                 (unsigned long)audio.out_packets,(unsigned long)audio.out_bytes,(unsigned long)audio.out_errors,
+                 (unsigned long)audio.in_packets,(unsigned long)audio.in_bytes,(unsigned long)audio.in_errors,
+                 (unsigned long)audio.bt_reports,(unsigned long)audio.bt_dropped,(unsigned long)audio.opus_errors,
+                 (unsigned long)audio.haptic_blocks,(unsigned long)audio.ns2_updates,(unsigned long)audio.ns2_stops,
+                 (unsigned long)audio.ns2_mixed_ticks);
+    }
 }
 
 static void print_auto_status() {
-    char json[768];
+    static char json[AUTO_MANAGER_REPLY_MAX];
     format_auto_status_json(json, sizeof(json));
     printf("%s\n", json);
 }
 
-static void format_auto_usb_status_json(char *out, size_t out_len) {
-    Ns2UsbStats stats;
-    ns2_usb_get_stats(&stats);
-    snprintf(out,
-             out_len,
-             "{\"ok\":true,\"profile\":\"auto\",\"usb\":\"%s\",\"nintendo_mounted\":%s,"
-           "\"nintendo_suspended\":%s,\"reports_sent\":%lu,\"reports_failed\":%lu,"
-           "\"report_raw_hz\":%lu,\"report_unique_hz\":%lu,"
-           "\"hid_out\":%lu,\"vendor_out\":%lu,\"vendor_in\":%lu,"
-             "\"report_rate_hz\":%u,\"rumble_active\":%s}",
-             auto_usb_identity_name(),
-             stats.mounted ? "true" : "false",
-             stats.suspended ? "true" : "false",
-           static_cast<unsigned long>(stats.reports_sent),
-           static_cast<unsigned long>(stats.reports_failed),
-           static_cast<unsigned long>(stats.report_raw_hz),
-           static_cast<unsigned long>(stats.report_unique_hz),
-           static_cast<unsigned long>(stats.hid_out_count),
-             static_cast<unsigned long>(stats.vendor_out_count),
-             static_cast<unsigned long>(stats.vendor_in_count),
-             static_cast<unsigned>(stats.report_rate_hz),
-             stats.rumble_active ? "true" : "false");
-}
+static void format_auto_usb_status_json(char *out, size_t out_len) { format_auto_status_json(out,out_len); }
 
 static void print_auto_usb_status() {
-    char json[512];
+    static char json[AUTO_MANAGER_REPLY_MAX];
     format_auto_usb_status_json(json, sizeof(json));
     printf("%s\n", json);
 }
 
-static int16_t read_le16s_auto(const uint8_t *p) {
-    return static_cast<int16_t>(static_cast<uint16_t>(p[0]) |
-                                (static_cast<uint16_t>(p[1]) << 8));
-}
-
-static uint16_t scale_u8_to_12(uint8_t value) {
-    return static_cast<uint16_t>((static_cast<uint32_t>(value) * 4095u + 127u) / 255u);
-}
-
-static void get_ds5_report_copy(uint8_t out[63]) {
-    critical_section_enter_blocking(&report_cs);
-    memcpy(out, interrupt_in_data, 63);
-    critical_section_exit(&report_cs);
-}
-
-static void format_auto_live_status_json(char *out, size_t out_len) {
-    uint8_t ds5_report[63];
-    get_ds5_report_copy(ds5_report);
-
-    const uint16_t ds5_lx = scale_u8_to_12(ds5_report[0]);
-    const uint16_t ds5_ly = scale_u8_to_12(ds5_report[1]);
-    const uint16_t ds5_rx = scale_u8_to_12(ds5_report[2]);
-    const uint16_t ds5_ry = scale_u8_to_12(ds5_report[3]);
-    const uint32_t ds5_buttons = static_cast<uint32_t>(ds5_report[7]) |
-                                 (static_cast<uint32_t>(ds5_report[8]) << 8) |
-                                 (static_cast<uint32_t>(ds5_report[9]) << 16);
-    const int16_t ds5_acc_x = read_le16s_auto(ds5_report + 15);
-    const int16_t ds5_acc_y = read_le16s_auto(ds5_report + 17);
-    const int16_t ds5_acc_z = read_le16s_auto(ds5_report + 19);
-    const int16_t ds5_gyr_x = read_le16s_auto(ds5_report + 21);
-    const int16_t ds5_gyr_y = read_le16s_auto(ds5_report + 23);
-    const int16_t ds5_gyr_z = read_le16s_auto(ds5_report + 25);
-    const uint32_t ds5_hash = hash_ds5_report_for_dedupe(ds5_report, sizeof(ds5_report));
-
-    Ns2InputSnapshot ns2_input{};
-    const bool ns2_valid = ns2_input_get_snapshot(&ns2_input);
-    Ns2MotionSample ns2_motion{};
-    const bool ns2_motion_valid = ns2_input_get_motion_sample(&ns2_motion);
-    Ns2UsbStats ns2_stats{};
-    ns2_usb_get_stats(&ns2_stats);
-
-    snprintf(out,
-             out_len,
-             "{\"ok\":true,\"profile\":\"auto\",\"active\":\"%s\",\"usb\":\"%s\",\"locked\":%s,"
-             "\"ds5\":{\"connected\":%s,\"valid\":%s,\"lx\":%u,\"ly\":%u,\"rx\":%u,\"ry\":%u,"
-             "\"buttons\":%lu,\"accX\":%d,\"accY\":%d,\"accZ\":%d,\"gyrX\":%d,\"gyrY\":%d,\"gyrZ\":%d,"
-             "\"bt_reports\":%lu,\"usb_raw_hz\":%lu,\"usb_unique_hz\":%lu,\"usb_raw_total\":%lu,"
-             "\"usb_unique_total\":%lu,\"usb_failed\":%lu,\"sample_hash\":%lu},"
-             "\"ns2\":{\"connected\":%s,\"valid\":%s,\"kind\":\"%s\",\"lx\":%u,\"ly\":%u,\"rx\":%u,\"ry\":%u,"
-             "\"buttons\":%lu,\"accX\":%d,\"accY\":%d,\"accZ\":%d,\"gyrX\":%d,\"gyrY\":%d,\"gyrZ\":%d,"
-             "\"updates\":%lu,\"usb_raw_hz\":%lu,\"usb_unique_hz\":%lu,\"usb_raw_total\":%lu,"
-             "\"usb_unique_total\":%lu,\"usb_failed\":%lu}}",
-             auto_profile_active_name(),
-             auto_usb_identity_name(),
-             auto_profile_locked() ? "true" : "false",
-             bt_classic_connected() ? "true" : "false",
-             bt_classic_connected() ? "true" : "false",
-             static_cast<unsigned>(ds5_lx),
-             static_cast<unsigned>(ds5_ly),
-             static_cast<unsigned>(ds5_rx),
-             static_cast<unsigned>(ds5_ry),
-             static_cast<unsigned long>(ds5_buttons),
-             static_cast<int>(ds5_acc_x),
-             static_cast<int>(ds5_acc_y),
-             static_cast<int>(ds5_acc_z),
-             static_cast<int>(ds5_gyr_x),
-             static_cast<int>(ds5_gyr_y),
-             static_cast<int>(ds5_gyr_z),
-             static_cast<unsigned long>(auto_profile_ds5_reports()),
-             static_cast<unsigned long>(ds5_usb_rate.raw_hz),
-             static_cast<unsigned long>(ds5_usb_rate.unique_hz),
-             static_cast<unsigned long>(ds5_usb_rate.raw_total),
-             static_cast<unsigned long>(ds5_usb_rate.unique_total),
-             static_cast<unsigned long>(ds5_usb_failed),
-             static_cast<unsigned long>(ds5_hash),
-             ns2_ble_connected() ? "true" : "false",
-             ns2_valid ? "true" : "false",
-             ns2_valid ? ns2_input_kind_name(ns2_input.kind) : "UNK",
-             ns2_valid ? static_cast<unsigned>(ns2_input.lx) : 2048u,
-             ns2_valid ? static_cast<unsigned>(ns2_input.ly) : 2048u,
-             ns2_valid ? static_cast<unsigned>(ns2_input.rx) : 2048u,
-             ns2_valid ? static_cast<unsigned>(ns2_input.ry) : 2048u,
-             ns2_valid ? static_cast<unsigned long>(ns2_input.buttons) : 0ul,
-             ns2_motion_valid ? static_cast<int>(ns2_motion.accel[0]) : 0,
-             ns2_motion_valid ? static_cast<int>(ns2_motion.accel[1]) : 0,
-             ns2_motion_valid ? static_cast<int>(ns2_motion.accel[2]) : 0,
-             ns2_motion_valid ? static_cast<int>(ns2_motion.gyro[0]) : 0,
-             ns2_motion_valid ? static_cast<int>(ns2_motion.gyro[1]) : 0,
-             ns2_motion_valid ? static_cast<int>(ns2_motion.gyro[2]) : 0,
-             ns2_valid ? static_cast<unsigned long>(ns2_input.updates) : 0ul,
-             static_cast<unsigned long>(ns2_stats.report_raw_hz),
-             static_cast<unsigned long>(ns2_stats.report_unique_hz),
-             static_cast<unsigned long>(ns2_stats.reports_sent),
-             static_cast<unsigned long>(ns2_stats.report_unique_total),
-             static_cast<unsigned long>(ns2_stats.reports_failed));
-}
-
-static void format_auto_motion_status_json(char *out, size_t out_len) {
-    Ns2InputSnapshot input;
-    const bool valid = ns2_input_get_snapshot(&input);
-    char motion_json[384];
-    ns2_input_format_motion_json(valid ? &input : nullptr, motion_json, sizeof(motion_json));
-    snprintf(out,
-             out_len,
-             "{\"ok\":true,\"profile\":\"auto\",\"input_valid\":%s,"
-             "\"kind\":\"%s\",\"len\":%u,\"updates\":%lu,"
-             "\"buttons\":%lu,\"lx\":%u,\"ly\":%u,\"rx\":%u,\"ry\":%u,%s}",
-             valid ? "true" : "false",
-             valid ? ns2_input_kind_name(input.kind) : "UNK",
-             valid ? static_cast<unsigned>(input.len) : 0u,
-             valid ? static_cast<unsigned long>(input.updates) : 0ul,
-             valid ? static_cast<unsigned long>(input.buttons) : 0ul,
-             valid ? static_cast<unsigned>(input.lx) : 2048u,
-             valid ? static_cast<unsigned>(input.ly) : 2048u,
-             valid ? static_cast<unsigned>(input.rx) : 2048u,
-             valid ? static_cast<unsigned>(input.ry) : 2048u,
-             motion_json);
-}
-
-static void print_auto_motion_status() {
-    char json[768];
-    format_auto_motion_status_json(json, sizeof(json));
-    printf("%s\n", json);
-}
-
-static void print_auto_candidates() {
-    char json[768];
-    ns2_status_format_candidates_json(json, sizeof(json));
-    printf("%s\n", json);
-}
-
-static void print_auto_help() {
-    printf("commands: status | usb status | motion status | stick recalibrate | reset detect | ns2 scan | ns2 pair | ns2 reconnect | ns2 disconnect | ns2 forget | ns2 auto on|off | ns2 candidates | bootrom\n");
-}
+static void format_auto_live_status_json(char *out, size_t size) { format_auto_status_json(out, size); }
+static void format_auto_motion_status_json(char *out, size_t size) { format_auto_status_json(out, size); }
+static void print_auto_help() { printf("status | mapping get/set/reset/save ds5|ns2pro | role set ds5|ds5-edge|xinput|ns2pro | input set auto|ds5|ns2pro | settings save/reset | bootsel\n"); }
+static void bridge_feedback(const bl616_bridge_feedback_t &feedback);
 
 static bool handle_auto_command_json(const char *raw_line, char *out, size_t out_len) {
     const char *line = skip_spaces(raw_line);
-    if (!out || out_len == 0) {
-        return false;
+    if (!out || !out_len) return false;
+    if (bridge_runtime_mapping_command(line, out, out_len)) return true;
+    if (strncmp(line, "role set ", 9) == 0) {
+        const char *name = line + 9;
+        uint8_t selected = strcmp(name, "ds5") == 0 || strcmp(name, "dualsense") == 0 ? 1 :
+            strcmp(name, "ns2pro") == 0 ? 2 :
+            strcmp(name, "ds5-edge") == 0 || strcmp(name, "dse") == 0 || strcmp(name, "dualsense-edge") == 0 ? 3 :
+            strcmp(name, "xinput") == 0 || strcmp(name, "xbox") == 0 || strcmp(name, "xbox360") == 0 ? 4 : 0;
+        if (!selected) { snprintf(out,out_len,"{\"ok\":false,\"error\":\"invalid_role\"}"); return true; }
+        bl616_bridge_feedback_t stop{}; stop.valid=1; bridge_feedback(stop);
+        output_pending=false; feedback_stop_ms=0;
+        bridge_runtime_set_role(selected);
+        spk_active = false; audio_reset_session(); state_init();
+        auto_usb_request_identity(static_cast<BridgeUsbIdentity>(selected), "manager");
+        snprintf(out,out_len,"{\"ok\":true,\"reboot_required\":false,\"reenumerating\":true}"); return true;
     }
+    if (strncmp(line, "input set ", 10) == 0) {
+        const char *name = line + 10;
+        uint8_t selected = strcmp(name,"auto") == 0 ? 0 : strcmp(name,"ds5") == 0 ? 1 : strcmp(name,"ns2pro") == 0 ? 2 : 255;
+        if (selected == 255) { snprintf(out,out_len,"{\"ok\":false,\"error\":\"invalid_source\"}"); return true; }
+        bridge_runtime_set_preference(selected);
+        reset_auto_session("source_change");
+        bt_set_classic_enabled(selected != 2);
+        if (selected == 1) ns2_ble_suspend_auto(); else ns2_ble_resume_auto();
+        format_auto_status_json(out,out_len); return true;
+    }
+    if (strcmp(line,"settings save") == 0) {
+        const bool bridge_ok = bridge_runtime_save();
+        const bool ds5_ok = config_save();
+        const bool ns2_ok = ns2_config_save();
+        snprintf(out,out_len,"{\"ok\":%s,\"saved\":%s}",bridge_ok && ds5_ok && ns2_ok ? "true":"false",bridge_ok && ds5_ok && ns2_ok ? "true":"false"); return true;
+    }
+    if (strcmp(line,"settings reset") == 0) {
+        const Ns2ConfigBody saved_ns2=ns2_config_get();
+        const bool had_target=ns2_config_has_saved_target();
+        bridge_runtime_defaults(); config_default(); ns2_config_reset_defaults();
+        if (had_target) ns2_config_set_saved_target(saved_ns2.saved_addr,saved_ns2.saved_addr_type,saved_ns2.last_success_boot_counter);
+        ns2_usb_init(); reset_auto_session("settings_reset");
+        bridge_runtime_reset_input();
+        bt_set_classic_enabled(true);
+        ns2_ble_resume_auto();
+        auto_usb_request_identity(BridgeUsbIdentity::SonyDs5,"settings_reset");
+        const bool ok = bridge_runtime_save() && config_save() && ns2_config_save();
+        snprintf(out,out_len,"{\"ok\":%s}",ok ? "true":"false"); return true;
+    }
+    if (strcmp(line,"reboot") == 0) {
+        auto_manager_reboot_requested = true;
+        snprintf(out,out_len,"{\"ok\":true,\"reboot\":true}"); return true;
+    }
+    if (strcmp(line,"ds5 pair") == 0 || strcmp(line,"ds5 reconnect") == 0) {
+        bridge_runtime_set_preference(1); reset_auto_session("ds5_connect"); ns2_ble_suspend_auto(); bt_set_classic_enabled(true);
+        if (strcmp(line,"ds5 pair") == 0) bt_pair(); else bt_reconnect();
+        format_auto_status_json(out,out_len); return true;
+    }
+    if (strcmp(line,"ds5 disconnect") == 0 || strcmp(line,"ds5 forget") == 0) {
+        if (strcmp(line,"ds5 forget") == 0) bt_forget(); else bt_disconnect();
+        bridge_runtime_reset_input(); format_auto_status_json(out,out_len); return true;
+    }
+    if ((strcmp(line,"rumble test left") == 0 || strcmp(line,"rumble test right") == 0 ||
+         strcmp(line,"rumble test both") == 0 || strcmp(line,"rumble stop") == 0) &&
+        auto_profile_locked() && auto_profile_active() == BridgeProfileId::Ds5FastPath) {
+        bl616_bridge_feedback_t feedback{}; feedback.valid = 1;
+        feedback.left_motor = strcmp(line,"rumble test right") && strcmp(line,"rumble stop") ? 32768 : 0;
+        feedback.right_motor = strcmp(line,"rumble test left") && strcmp(line,"rumble stop") ? 32768 : 0;
+        bridge_feedback(feedback); feedback_stop_ms=to_ms_since_boot(get_absolute_time())+250; snprintf(out,out_len,"{\"ok\":true}"); return true;
+    }
+
     if (line[0] == 0) {
         snprintf(out, out_len, "{\"ok\":false,\"error\":\"empty_command\"}");
         return true;
@@ -588,18 +466,21 @@ static bool handle_auto_command_json(const char *raw_line, char *out, size_t out
         return true;
     }
     if (strcmp(line, "ns2 scan") == 0) {
+        bridge_runtime_set_preference(2); reset_auto_session("ns2_connect"); bt_set_classic_enabled(false);
         ns2_ble_resume_auto();
         ns2_ble_start_scan();
         format_auto_status_json(out, out_len);
         return true;
     }
     if (strcmp(line, "ns2 pair") == 0) {
+        bridge_runtime_set_preference(2); reset_auto_session("ns2_connect"); bt_set_classic_enabled(false);
         ns2_ble_resume_auto();
         ns2_ble_pair();
         format_auto_status_json(out, out_len);
         return true;
     }
     if (strcmp(line, "ns2 reconnect") == 0) {
+        bridge_runtime_set_preference(2); reset_auto_session("ns2_connect"); bt_set_classic_enabled(false);
         ns2_ble_resume_auto();
         ns2_ble_reconnect();
         format_auto_status_json(out, out_len);
@@ -607,11 +488,13 @@ static bool handle_auto_command_json(const char *raw_line, char *out, size_t out
     }
     if (strcmp(line, "ns2 disconnect") == 0) {
         ns2_ble_disconnect();
+        bridge_runtime_reset_input();
         format_auto_status_json(out, out_len);
         return true;
     }
     if (strcmp(line, "ns2 forget") == 0) {
         ns2_ble_forget();
+        bridge_runtime_reset_input();
         format_auto_status_json(out, out_len);
         return true;
     }
@@ -646,7 +529,7 @@ static bool handle_auto_command_json(const char *raw_line, char *out, size_t out
                  "{\"ok\":true,\"commands\":\"status | usb status | motion status | stick recalibrate | reset detect | ns2 scan | ns2 pair | ns2 reconnect | ns2 disconnect | ns2 forget | ns2 auto on|off | ns2 candidates | bootrom\"}");
         return true;
     }
-    if (strcmp(line, "bootrom") == 0 || strcmp(line, "uf2") == 0) {
+    if (strcmp(line, "bootrom") == 0 || strcmp(line, "uf2") == 0 || strcmp(line,"bootsel") == 0) {
         auto_manager_bootrom_requested = true;
         snprintf(out, out_len, "{\"ok\":true,\"action\":\"bootrom\"}");
         return true;
@@ -666,7 +549,7 @@ static void handle_auto_command(const char *raw_line) {
         return;
     }
 
-    char json[768];
+    static char json[AUTO_MANAGER_REPLY_MAX];
     if (handle_auto_command_json(line, json, sizeof(json))) {
         printf("%s\n", json);
         if (auto_manager_bootrom_requested) {
@@ -715,9 +598,8 @@ static void auto_manager_receive_feature_command(const uint8_t *payload, uint16_
     memcpy(auto_manager.last_command, payload, copy_len);
     auto_manager.last_command[copy_len] = 0;
 
-    char json[AUTO_MANAGER_REPLY_MAX];
-    handle_auto_command_json(auto_manager.last_command, json, sizeof(json));
-    auto_manager_queue_json(json);
+    auto_manager_command_pending = true;
+    auto_manager.reply_len = 0; auto_manager.reply_complete = false;
 }
 
 static uint16_t auto_manager_build_feature_report(uint8_t *buffer, uint16_t reqlen) {
@@ -726,8 +608,9 @@ static uint16_t auto_manager_build_feature_report(uint8_t *buffer, uint16_t reql
     }
 
     auto_manager.get_count++;
+    if (auto_manager_command_pending) return 0;
     if (auto_manager.reply_len == 0) {
-        char json[768];
+        static char json[AUTO_MANAGER_REPLY_MAX];
         format_auto_status_json(json, sizeof(json));
         auto_manager_queue_json(json);
     }
@@ -760,7 +643,7 @@ static uint16_t auto_manager_build_feature_report(uint8_t *buffer, uint16_t reql
         auto_manager.reply_offset = static_cast<uint16_t>(offset + chunk_len);
         if (auto_manager.reply_offset >= total) {
             auto_manager.reply_complete = true;
-            if (!auto_manager_bootrom_requested) {
+            if (!auto_manager_bootrom_requested && !auto_manager_reboot_requested) {
                 auto_manager.reply_len = 0;
                 auto_manager.reply_offset = 0;
             }
@@ -798,6 +681,7 @@ static void auto_serial_poll() {
 #endif
 
 void interrupt_loop() {
+#if !ENABLE_AUTO_PROFILE
     if (!tud_hid_ready()) return;
 
     // TODO: Refactor for better code reuse
@@ -809,7 +693,7 @@ void interrupt_loop() {
 #endif
         } else {
 #if ENABLE_AUTO_PROFILE
-            report_rate_note(&ds5_usb_rate, hash_ds5_report_for_dedupe(interrupt_in_data, 63));
+            ++ds5_usb_sent;
 #endif
         }
         return;
@@ -843,24 +727,23 @@ void interrupt_loop() {
             critical_section_exit(&report_cs);
 #if ENABLE_AUTO_PROFILE
         } else {
-            report_rate_note(&ds5_usb_rate, hash_ds5_report_for_dedupe(safe_report, 63));
+            ++ds5_usb_sent;
 #endif
         }
     }
+#endif
 }
 
 void on_bt_data(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
-    // printf("[Main] BT data callback: channel=%u len=%u\n", channel, len);
-    if (channel == INTERRUPT && data[1] == 0x31) {
+    if (channel == INTERRUPT && audio_bt_input(data,len)) return;
+    if (channel == INTERRUPT && data && len >= 66 && data[1] == 0x31) {
 #if ENABLE_AUTO_PROFILE
-        if (!auto_profile_note_ds5_input(len)) {
+        if (!bridge_runtime_accepts(1) || !auto_profile_note_ds5_input(len)) {
             return;
         }
-        apply_profile_lock_actions();
+        bridge_runtime_ds5(data + 3, 63, to_ms_since_boot(get_absolute_time()));
 #endif
-        if ((data[56] & 1) != (interrupt_in_data[53] & 1)) {
-            set_headset(data[56] & 1);
-        }
+        set_headset(data[56] & 1);
 
         if (get_config().polling_rate_mode != 2) {
             memcpy(interrupt_in_data, data + 3, 63);
@@ -919,12 +802,13 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
         return pico_cmd_get(report_id, buffer, reqlen);
     }
 
+#if ENABLE_AUTO_PROFILE
+    if (!bt_classic_connected()) return bridge_features_get_fallback(report_id,buffer,reqlen);
+#endif
     std::vector<uint8_t> feature_data = get_feature_data(report_id, reqlen);
-    if (!feature_data.empty()) {
-        memcpy(buffer, feature_data.data() + 1, feature_data.size() - 1);
-    }
-
-    return feature_data.empty() ? 0 : feature_data.size() - 1;
+    const size_t length = feature_data.empty() ? 0 : (feature_data.size()-1 < reqlen ? feature_data.size()-1 : reqlen);
+    if (length) memcpy(buffer,feature_data.data()+1,length);
+    return length;
 }
 
 bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
@@ -935,7 +819,9 @@ bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_reques
     if (itf == 1) {
         printf("[AUDIO] Set interface Speaker to alternate setting %d\n", alt);
         spk_active = alt;
+        audio_speaker_set_open(alt != 0);
     }
+    if (itf == 2) audio_mic_set_open(alt != 0);
 
     return true;
 }
@@ -945,6 +831,21 @@ bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_reques
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const *buffer,
                            uint16_t bufsize) {
 #if ENABLE_AUTO_PROFILE
+    // Nintendo's manager transport prefers output report 0x02, with the
+    // same Y7HID1 body as Feature 0x7f. Consume it before rumble routing.
+    if (auto_usb_is_nintendo() && report_type != HID_REPORT_TYPE_FEATURE && buffer) {
+        const uint8_t *payload=buffer; uint16_t length=bufsize;
+        uint8_t id=report_id;
+        if (!id && length) { id=*payload++; --length; }
+        if (id==2 && length>=6 && memcmp(payload,AUTO_MANAGER_SET_MAGIC,6)==0) {
+            auto_manager_receive_feature_command(payload,length); return;
+        }
+    }
+    if (!output_processing && report_type != HID_REPORT_TYPE_FEATURE) {
+        if (!buffer || bufsize > sizeof(output_bytes)) return;
+        output_itf=itf; output_id=report_id; output_type=report_type; output_size=bufsize;
+        memcpy(output_bytes,buffer,bufsize); output_pending=true; return;
+    }
     if (report_type == HID_REPORT_TYPE_FEATURE) {
         uint8_t effective_report_id = report_id;
         uint8_t const *payload = buffer;
@@ -963,6 +864,21 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
     if (auto_usb_is_debug_only()) {
         (void)itf;
         return;
+    }
+    if (report_type != HID_REPORT_TYPE_FEATURE && auto_profile_locked()) {
+        uint8_t report[80]{};
+        size_t len = bufsize < sizeof(report) - 1 ? bufsize : sizeof(report) - 1;
+        if (report_id) { report[0] = report_id; memcpy(report + 1,buffer,len); ++len; }
+        else { memcpy(report,buffer,len); }
+        bl616_bridge_feedback_t feedback{};
+        if (auto_usb_is_nintendo() && auto_profile_active() == BridgeProfileId::Ds5FastPath) {
+            if (bl616_bridge_decode_ns2pro_output(report,len,&feedback) == 0) bridge_feedback(feedback);
+            return;
+        }
+        if (auto_usb_is_sony_ds5() && auto_profile_active() == BridgeProfileId::Ns2ProCompatibility) {
+            if (bl616_bridge_decode_ds5_output(report,len,&feedback) == 0) bridge_feedback(feedback);
+            return;
+        }
     }
     if (auto_usb_is_nintendo()) {
         ns2_usb_hid_set_report_cb(itf,
@@ -985,11 +901,16 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         return;
     }
 
+    if (report_id == 2 && bufsize <= 63) {
+        uint8_t full[64]{}; full[0]=2; memcpy(full+1,buffer,bufsize);
+        tud_hid_set_report_cb(itf,0,report_type,full,bufsize+1); return;
+    }
     // INTERRUPT OUT
+    if (!buffer || !bufsize) return;
     if (report_id == 0) {
         switch (buffer[0]) {
             case 0x02: {
-                state_update(buffer + 1, bufsize - 1);
+                state_update(buffer + 1, (bufsize - 1 < sizeof(SetStateData) ? bufsize - 1 : sizeof(SetStateData)));
                 if (spk_active) {
                     break;
                 }
@@ -1025,12 +946,19 @@ void tud_mount_cb(void) {
 }
 
 void tud_umount_cb(void) {
+    ns2_usb_set_motors(0, 0);
+    output_pending = false; feedback_stop_ms = 0;
+    state_init();
+    spk_active=false; audio_reset_session();
     if (auto_usb_is_nintendo()) {
         ns2_usb_umount_cb();
     }
 }
 
 void tud_suspend_cb(bool remote_wakeup_en) {
+    ns2_usb_set_motors(0, 0);
+    output_pending = false; feedback_stop_ms = 0;
+    audio_reset_session(false);
     if (auto_usb_is_nintendo()) {
         ns2_usb_suspend_cb(remote_wakeup_en);
     }
@@ -1055,8 +983,54 @@ void tud_vendor_tx_cb(uint8_t itf, uint32_t sent_bytes) {
 }
 #endif
 
+#if ENABLE_AUTO_PROFILE
+static void bridge_feedback(const bl616_bridge_feedback_t &feedback) {
+    if (!feedback.valid || !auto_profile_locked()) return;
+    if (auto_profile_active() == BridgeProfileId::Ns2ProCompatibility) {
+        ns2_usb_set_motors(feedback.left_motor,feedback.right_motor);
+    } else if (bt_classic_connected()) {
+        uint8_t usb_report[48]{};
+        bl616_bridge_encode_ds5_output(&feedback,usb_report);
+        state_update(usb_report+1,47);
+        uint8_t report[78]{}; report[0]=0x31; report[1]=(reportSeqCounter++ & 15)<<4; report[2]=0x10;
+        state_set(report+3,sizeof(SetStateData)); bt_write(report,sizeof(report));
+    }
+}
+static void bridge_output_tick() {
+    if (auto_usb_switch_pending()) {
+        output_pending=false;
+        uint8_t discarded[80]; xinput_usb_take_output(discarded,sizeof(discarded));
+        return;
+    }
+    if (output_pending) {
+        output_pending=false; output_processing=true;
+        tud_hid_set_report_cb(output_itf,output_id,static_cast<hid_report_type_t>(output_type),output_bytes,output_size);
+        output_processing=false;
+    }
+    uint8_t report[80]{};
+    size_t length = xinput_usb_take_output(report,sizeof(report));
+    bl616_bridge_feedback_t feedback{};
+    if (length && bl616_bridge_decode_xbox_output(report,length,&feedback) == 0) bridge_feedback(feedback);
+    const uint32_t now_ms=to_ms_since_boot(get_absolute_time());
+    if (feedback_stop_ms && static_cast<int32_t>(now_ms-feedback_stop_ms)>=0) {
+        feedback_stop_ms=0; feedback={}; feedback.valid=1; bridge_feedback(feedback);
+    }
+    if (auto_usb_switch_pending() || auto_usb_is_nintendo() || auto_usb_is_debug_only()) return;
+    static uint64_t next_report_us=0;
+    const uint64_t now=time_us_64();
+    if (now < next_report_us) return;
+    next_report_us=now + 1000000u/ns2_config_report_rate_hz();
+    auto target=auto_usb_identity()==BridgeUsbIdentity::XInput ? BL616_BRIDGE_ROLE_XBOX_360 :
+        auto_usb_identity()==BridgeUsbIdentity::SonyDsEdge ? BL616_BRIDGE_ROLE_DUALSENSE_EDGE : BL616_BRIDGE_ROLE_DUALSENSE;
+    length=bridge_runtime_report(target,report,sizeof(report),now_ms);
+    if (!length) return;
+    if (target==BL616_BRIDGE_ROLE_XBOX_360) { if (xinput_usb_ready()) xinput_usb_send(report,length); }
+    else if (tud_hid_ready()) { if(tud_hid_report(1,report+1,63)) ++ds5_usb_sent; else ++ds5_usb_failed; }
+}
+#endif
+
 int main() {
-    vreg_set_voltage(VREG_VOLTAGE_1_20);
+    vreg_set_voltage(SYS_CLOCK_KHZ > 150000 ? VREG_VOLTAGE_1_20 : VREG_VOLTAGE_1_10);
     sleep_ms(1000);
     set_sys_clock_khz(SYS_CLOCK_KHZ, true);
 
@@ -1076,6 +1050,17 @@ int main() {
 #if ENABLE_AUTO_PROFILE
     auto_usb_init();
 #endif
+
+    // Initialize the critical section for the report buffer
+    critical_section_init(&report_cs);
+
+    config_load();
+#if ENABLE_AUTO_PROFILE
+    bridge_runtime_init();
+#endif
+
+    audio_init();
+    state_init();
 
     if (cyw43_arch_init()) {
         printf("Failed to initialize CYW43\n");
@@ -1104,11 +1089,6 @@ int main() {
     }
 #endif
 
-    // Initialize the critical section for the report buffer
-    critical_section_init(&report_cs);
-
-    config_load();
-
     bt_init();
     bt_register_data_callback(on_bt_data);
 
@@ -1119,10 +1099,11 @@ int main() {
     ns2_input_register_callback(on_ns2_input_auto);
     ns2_ble_init_for_shared_hci();
     ns2_usb_init();
+    bt_set_classic_enabled(bridge_runtime_preference() != 2);
+    if (bridge_runtime_preference() == 1) ns2_ble_suspend_auto();
+    auto_usb_request_identity(static_cast<BridgeUsbIdentity>(bridge_runtime_role()),"boot");
 #endif
 
-    audio_init();
-    state_init();
 
 #if !ENABLE_SERIAL
     watchdog_enable(1000, true);
@@ -1133,28 +1114,45 @@ int main() {
         watchdog_update();
 #endif
         cyw43_arch_poll();
+        bt_tick();
         tud_task();
 #if ENABLE_AUTO_PROFILE
 #if ENABLE_SERIAL
         auto_serial_poll();
 #endif
+        if (auto_manager_command_pending) {
+            static char json[AUTO_MANAGER_REPLY_MAX];
+            auto_manager_command_pending = false;
+            handle_auto_command_json(auto_manager.last_command,json,sizeof(json));
+            auto_manager_queue_json(json);
+        }
+        apply_profile_lock_actions();
         auto_usb_task();
         ns2_ble_tick();
         auto_session_tick();
-        if (auto_manager_bootrom_requested &&
+        if ((auto_manager_bootrom_requested || auto_manager_reboot_requested) &&
             auto_manager.reply_complete) {
             sleep_ms(50);
-            reset_usb_boot(0, 0);
+            if (auto_manager_reboot_requested) watchdog_reboot(0,0,0); else reset_usb_boot(0, 0);
         }
 #endif
 #if ENABLE_AUTO_PROFILE
-        if (auto_usb_is_nintendo()) {
-            ns2_usb_task();
-        } else if (auto_usb_is_sony_ds5()) {
+        audio_mic_service(auto_usb_is_sony_ds5() && !auto_usb_switch_pending() && auto_profile_locked() && auto_profile_active()==BridgeProfileId::Ds5FastPath && bt_classic_connected() && tud_mounted() && !tud_suspended());
+        bridge_output_tick();
+        if (auto_usb_is_nintendo()) ns2_usb_task(); else ns2_usb_feedback_task();
+        const bool audio_output_eligible = auto_usb_is_sony_ds5() && spk_active &&
+            !auto_usb_switch_pending() && tud_mounted() && !tud_suspended() && active_profile_connected();
+        if (audio_output_eligible && auto_profile_active() == BridgeProfileId::Ds5FastPath)
             audio_loop();
-            interrupt_loop();
+        else if (audio_output_eligible && auto_profile_active() == BridgeProfileId::Ns2ProCompatibility)
+            audio_loop_ns2_haptics();
+        else if (tud_audio_available()) {
+            const uint32_t irq_state = save_and_disable_interrupts();
+            tud_audio_clear_ep_out_ff();
+            restore_interrupts(irq_state);
         }
 #else
+        audio_mic_service(bt_classic_connected() && tud_mounted() && !tud_suspended());
         audio_loop();
         interrupt_loop();
 #endif

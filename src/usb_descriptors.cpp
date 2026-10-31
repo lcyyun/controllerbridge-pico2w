@@ -29,6 +29,7 @@
 #if ENABLE_AUTO_PROFILE
 #include "profiles/auto_usb.h"
 #include "ns2/ns2_usb_descriptors.h"
+#include "xinput_usb.h"
 #endif
 
 #ifndef ENABLE_SERIAL
@@ -36,6 +37,11 @@
 #endif
 
 bool ds_mode() {
+#if ENABLE_AUTO_PROFILE
+    // The selected USB role is independent of the physical controller model.
+    if (auto_usb_identity() == BridgeUsbIdentity::SonyDsEdge) return false;
+    if (auto_usb_identity() == BridgeUsbIdentity::SonyDs5) return true;
+#endif
     if (get_config().controller_mode == 2) {
         return !is_dse;
     }
@@ -168,6 +174,36 @@ static uint8_t descriptor_configuration_debug[] = {
                        0x40,
                        0x01),
 };
+
+static const tusb_desc_device_t desc_device_xinput = {
+    .bLength = sizeof(tusb_desc_device_t),
+    .bDescriptorType = TUSB_DESC_DEVICE,
+    .bcdUSB = 0x0200,
+    .bDeviceClass = 0,
+    .bDeviceSubClass = 0,
+    .bDeviceProtocol = 0,
+    .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
+    .idVendor = 0xcafe,
+    .idProduct = 0x4013,
+    .bcdDevice = 0x0100,
+    .iManufacturer = STRID_MANUFACTURER,
+    .iProduct = STRID_PRODUCT,
+    .iSerialNumber = STRID_SERIAL,
+    .bNumConfigurations = 1,
+};
+
+static const uint8_t descriptor_configuration_xinput[] = {
+    TUD_CONFIG_DESCRIPTOR(1, 2, 0, 74, 0, 100),
+    // Interface 0: XUSB gamepad, followed by its protocol descriptor.
+    9, TUSB_DESC_INTERFACE, 0, 0, 2, 0xff, 0x5d, 1, 0,
+    17, 0x21, 0, 1, 1, 0x25, 0x81, 20, 0, 0, 0, 0, 0x13, 0x02, 8, 0, 0,
+    7, TUSB_DESC_ENDPOINT, 0x81, TUSB_XFER_INTERRUPT, 32, 0, 1,
+    7, TUSB_DESC_ENDPOINT, 0x02, TUSB_XFER_INTERRUPT, 32, 0, 8,
+    // Interface 1: vendor-page HID manager, untouched by XUSB driver binding.
+    TUD_HID_DESCRIPTOR(1, STRID_AUTO_MANAGER, HID_ITF_PROTOCOL_NONE,
+                       sizeof(desc_hid_report_auto_manager), 0x83, 64, 1),
+};
+static_assert(sizeof(descriptor_configuration_xinput) == 74);
 #endif
 
 // Invoked when received GET DEVICE DESCRIPTOR
@@ -180,6 +216,10 @@ uint8_t const *tud_descriptor_device_cb(void) {
     if (auto_usb_identity() == BridgeUsbIdentity::NintendoSwitchPro) {
         return ns2_usb_descriptor_device_cb();
     }
+    if (auto_usb_identity() == BridgeUsbIdentity::XInput) {
+        return reinterpret_cast<const uint8_t *>(&desc_device_xinput);
+    }
+    desc_device.iSerialNumber = STRID_SERIAL;
 #endif
     desc_device.idProduct = ds_mode() ? 0x0CE6 : 0x0DF2;
     return reinterpret_cast<uint8_t const *>(&desc_device);
@@ -474,6 +514,9 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     }
     if (auto_usb_identity() == BridgeUsbIdentity::NintendoSwitchPro) {
         return ns2_usb_descriptor_configuration_cb(index);
+    }
+    if (auto_usb_identity() == BridgeUsbIdentity::XInput) {
+        return descriptor_configuration_xinput;
     }
 #endif
     (void) index; // for multiple configurations
@@ -919,7 +962,8 @@ static_assert(sizeof(desc_hid_report_dse) == 0x01B5);
 // Descriptor contents must exist long enough for transfer to complete
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf) {
 #if ENABLE_AUTO_PROFILE
-    if (auto_usb_identity() == BridgeUsbIdentity::DebugOnly) {
+    if (auto_usb_identity() == BridgeUsbIdentity::DebugOnly ||
+        auto_usb_identity() == BridgeUsbIdentity::XInput) {
         (void)itf;
         return desc_hid_report_auto_manager;
     }
@@ -959,15 +1003,22 @@ static uint16_t _desc_str[60 + 1];
 // Application return pointer to descriptor, whose contents must exist long enough for transfer to complete
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
 #if ENABLE_AUTO_PROFILE
+    if (auto_usb_identity() == BridgeUsbIdentity::XInput && index == 0xee) {
+        return xinput_usb_msos_string();
+    }
     if (auto_usb_identity() == BridgeUsbIdentity::NintendoSwitchPro) {
         return ns2_usb_descriptor_string_cb(index, langid);
     }
     if (auto_usb_identity() == BridgeUsbIdentity::DebugOnly) {
-        string_desc_arr[1] = "ns2pro-bridge";
-        string_desc_arr[2] = "Auto Profile Debug";
+        string_desc_arr[1] = "ControllerBridge";
+        string_desc_arr[2] = "Pico 2 W Controller Bridge Manager";
+    } else if (auto_usb_identity() == BridgeUsbIdentity::XInput) {
+        string_desc_arr[1] = "ControllerBridge";
+        string_desc_arr[2] = "Pico 2 W XInput Bridge";
     } else
 #endif
     {
+        string_desc_arr[1] = "Sony Interactive Entertainment";
         if (ds_mode()) {
 #if ENABLE_AUTO_PROFILE
             if (auto_usb_identity() == BridgeUsbIdentity::SonyDs5) {
@@ -978,7 +1029,11 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
             string_desc_arr[2] = "DualSense Wireless Controller";
             }
         }else {
+#if ENABLE_AUTO_PROFILE
+            string_desc_arr[2] = "Pico 2 W DualSense Edge HID";
+#else
             string_desc_arr[2] = "DualSense Edge Wireless Controller";
+#endif
         }
     }
     (void) langid;
@@ -1001,6 +1056,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
             if (!(index < sizeof(string_desc_arr) / sizeof(string_desc_arr[0]))) return NULL;
 
             const char *str = string_desc_arr[index];
+            if (!str) return nullptr;
 
             // Cap at max char
             chr_count = strlen(str);
@@ -1029,6 +1085,9 @@ uint8_t const *tud_descriptor_bos_cb(void) {
 }
 
 bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const *request) {
+    if (auto_usb_identity() == BridgeUsbIdentity::XInput) {
+        return xinput_usb_control_xfer(rhport, stage, request);
+    }
     if (auto_usb_identity() == BridgeUsbIdentity::NintendoSwitchPro) {
         return ns2_usb_vendor_control_xfer_cb(rhport, stage, request);
     }

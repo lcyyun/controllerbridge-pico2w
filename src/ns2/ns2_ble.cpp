@@ -6,6 +6,7 @@
 
 #include "ble/le_device_db.h"
 #include "btstack.h"
+#include "btstack_crypto.h"
 #include "ns2_gatt.h"
 #include "ns2_input.h"
 #include "ns2_state.h"
@@ -29,7 +30,6 @@ constexpr int8_t STRONG_CANDIDATE_RSSI = -75;
 constexpr uint32_t AUTO_START_DELAY_MS = 600;
 constexpr uint32_t CONNECT_WATCHDOG_MS = 30000;
 constexpr uint32_t GATT_DISCOVERY_DELAY_MS = 0;
-constexpr uint32_t SAVED_RECONNECT_GATT_DELAY_MS = 300;
 constexpr uint32_t GATT_DISCOVERY_RETRY_MS = 50;
 constexpr uint8_t MAX_GATT_DISCOVERY_RETRIES = 20;
 constexpr uint32_t MTU_EXCHANGE_TIMEOUT_MS = 1000;
@@ -105,13 +105,32 @@ struct CharacteristicSlot {
     gatt_client_notification_t notification;
     Ns2GattRole role;
     bool subscribed;
+    bool listening;
 };
 
 struct BleRuntime {
     bool hci_ready;
     bool suspended;
+    bool manually_disconnected;
+    bool forget_bond_pending;
+    uint8_t forget_addr[6];
+    uint8_t forget_addr_type;
+    bool save_target_pending;
+    bool pairing_required;
+    bool pair_save_pending;
+    bool pair_waiting_ack;
+    uint8_t pair_step;
+    uint8_t pair_random[32];
+    uint8_t pair_ltk[16];
+    uint8_t pair_expected[16];
+    uint32_t session;
+    uint8_t command_buffer[32];
+    uint64_t init_send_due_ms;
+    uint64_t pair_deadline_ms;
+    ConnectMode requested_mode;
     bool scanning;
     bool connecting;
+    bool disconnect_pending;
     bool direct_saved_tried;
     bool pending_connect_valid;
     bool target_saved_this_connection;
@@ -133,6 +152,7 @@ struct BleRuntime {
     uint64_t retry_window_started_ms;
     uint64_t next_retry_ms;
     uint64_t last_rssi_poll_ms;
+    uint64_t ready_since_ms;
 
     ServiceSlot services[MAX_SERVICES];
     CharacteristicSlot chars[MAX_CHARS];
@@ -145,6 +165,8 @@ struct BleRuntime {
     uint16_t rumble_value_handle;
     bool command_write_without_response;
     bool rumble_write_without_response;
+    bool rumble_write_pending;
+    uint8_t rumble_packet[64];
     bool security_pending;
     bool security_required;
     bool mtu_exchange_pending;
@@ -156,6 +178,13 @@ struct BleRuntime {
 };
 
 BleRuntime ble{};
+// Requests stay allocated until BTstack's asynchronous crypto callback completes,
+// even if the link disappears in the meantime.
+btstack_crypto_random_t pair_random_request{};
+btstack_crypto_aes128_t pair_aes_request{};
+bool pair_crypto_pending = false;
+uint32_t pair_crypto_session = 0;
+uint8_t pair_crypto_key[16], pair_crypto_plaintext[16], pair_crypto_result[16];
 btstack_packet_callback_registration_t hci_event_callback_registration{};
 btstack_packet_callback_registration_t sm_event_callback_registration{};
 
@@ -168,6 +197,13 @@ uint64_t now_ms() {
 }
 
 void clear_gatt_results() {
+    // BTstack retains pointers to registrations until explicitly removed.
+    // Zeroing a live registration would corrupt its notification linked list.
+    for (auto &slot : ble.chars) {
+        if (slot.listening) {
+            gatt_client_stop_listening_for_characteristic_value_updates(&slot.notification);
+        }
+    }
     memset(ble.services, 0, sizeof(ble.services));
     memset(ble.chars, 0, sizeof(ble.chars));
     ble.service_count = 0;
@@ -178,6 +214,7 @@ void clear_gatt_results() {
     ble.rumble_value_handle = 0;
     ble.command_write_without_response = false;
     ble.rumble_write_without_response = false;
+    ble.rumble_write_pending = false;
     ble.security_pending = false;
     ble.security_required = false;
     ble.pair_required_after_disconnect = false;
@@ -188,6 +225,12 @@ void clear_gatt_results() {
     ble.known_handle_due_ms = 0;
     ble.init_index = 0;
     ble.init_command_sent_ms = 0;
+    ble.init_send_due_ms = 0;
+    ble.pair_waiting_ack = false;
+    ble.pair_step = 0;
+    ble.pair_save_pending = false;
+    memset(ble.pair_ltk, 0, sizeof(ble.pair_ltk));
+    memset(ble.pair_expected, 0, sizeof(ble.pair_expected));
 }
 
 void reset_gatt_cache() {
@@ -209,12 +252,10 @@ void print_le_db_summary() {
         if (ns2_addr_is_empty(addr)) {
             continue;
         }
-        printf("[NS2 SM] LE DB[%d] type=%d addr=%s irk0=%02x%02x\n",
+        printf("[NS2 SM] LE DB[%d] type=%d addr=%s\n",
                i,
                addr_type,
-               bd_addr_to_str(addr),
-               irk[0],
-               irk[1]);
+               bd_addr_to_str(addr));
     }
 }
 
@@ -462,7 +503,8 @@ void reset_retry_window() {
 }
 
 bool start_connect(const uint8_t addr[6], uint8_t addr_type, ConnectMode mode, const char *label) {
-    if (!ble.hci_ready) {
+    if (!ble.hci_ready || ble.suspended || ble.manually_disconnected ||
+        ble.connecting || ble.con_handle != HCI_CON_HANDLE_INVALID) {
         ns2_status_set_last_error("BLE stack is not ready");
         return false;
     }
@@ -503,7 +545,7 @@ bool start_connect(const uint8_t addr[6], uint8_t addr_type, ConnectMode mode, c
 }
 
 bool start_scan_internal(ConnectMode mode) {
-    if (!ble.hci_ready) {
+    if (!ble.hci_ready || ble.suspended || ble.manually_disconnected) {
         ns2_status_set_last_error("BLE stack is not ready");
         return false;
     }
@@ -527,15 +569,18 @@ bool start_scan_internal(ConnectMode mode) {
 }
 
 void start_auto_attempt() {
-    if (!ns2_config_auto_connect_enabled()) {
+    if (ble.suspended || ble.manually_disconnected ||
+        (!ns2_config_auto_connect_enabled() && ble.requested_mode == ConnectMode::None)) {
         ns2_status_set_state(Ns2BleState::Idle);
         return;
     }
 
     ns2_status_clear_error();
-    printf("[NS2 BLE] auto pair scan started; saved-address reconnect disabled bond_count=%d\n",
-           le_device_db_count());
-    start_scan_internal(ConnectMode::PairingScan);
+    // A powered-off bonded controller advertises as bound when any key wakes it.
+    // Pairing-only advertisements exclude that normal reconnect path.
+    const ConnectMode mode = ble.requested_mode != ConnectMode::None ? ble.requested_mode :
+        (ns2_config_has_saved_target() ? ConnectMode::ScanAuto : ConnectMode::PairingScan);
+    start_scan_internal(mode);
 }
 
 void clear_saved_target_after_security_failure() {
@@ -543,17 +588,21 @@ void clear_saved_target_after_security_failure() {
         return;
     }
 
-    ns2_config_forget_saved_target();
-    ns2_config_set_auto_connect(false);
-    const bool ok = ns2_config_save();
-    ble.pair_required_after_disconnect = true;
-    ns2_status_set_last_error("pair required");
-    printf("[NS2 BLE] saved target security failed; cleared saved target and disabled auto ok=%u; run ns2 pair\n",
-           ok ? 1u : 0u);
+    // A timeout is not evidence that the stored peer or its bond is invalid.
+    // Preserve both and retry from the main-loop backoff; explicit forget/pair
+    // is the only operation that may replace a user's stored target.
+    ns2_status_set_last_error("security failed; retrying saved peer");
 }
 
 void disconnect_and_backoff(const char *error) {
     if (ble.con_handle != HCI_CON_HANDLE_INVALID) {
+        if (ble.disconnect_pending) return;
+        ble.disconnect_pending = true;
+        ble.gatt_stage = GattStage::Idle;
+        ble.init_send_due_ms = 0;
+        ble.init_command_sent_ms = 0;
+        ble.pair_waiting_ack = false;
+        ++ble.session; // Invalidate any in-flight crypto completion.
         gap_disconnect(ble.con_handle);
         if (error && error[0]) {
             ns2_status_set_last_error(error);
@@ -725,6 +774,7 @@ bool subscribe_next(Ns2GattRole role) {
             gatt_packet_handler,
             ble.con_handle,
             &slot.characteristic);
+        slot.listening = true;
 
         ble.cccd_enable_notify[0] = 0x01;
         ble.cccd_enable_notify[1] = 0x00;
@@ -783,7 +833,136 @@ bool write_command(const uint8_t *data, uint16_t len) {
     return status == ERROR_CODE_SUCCESS;
 }
 
+int current_peer_db_index() {
+    for (int i = 0; i < le_device_db_max_count(); ++i) {
+        int type;
+        bd_addr_t addr{};
+        sm_key_t irk{};
+        le_device_db_info(i, &type, addr, irk);
+        if (type == ble.current_addr_type && memcmp(addr, ble.current_addr, 6) == 0) return i;
+    }
+    return -1;
+}
+
+bool current_peer_has_ltk() {
+    const int index = current_peer_db_index();
+    if (index < 0) return false;
+    sm_key_t key{};
+    int key_size = 0;
+    le_device_db_encryption_get(index, nullptr, nullptr, key, &key_size, nullptr, nullptr, nullptr);
+    uint8_t any = 0;
+    for (uint8_t byte : key) any |= byte;
+    return key_size == 16 && any != 0;
+}
+
+void pair_random_ready(void *) {
+    pair_crypto_pending = false;
+    if (pair_crypto_session != ble.session || ble.con_handle == HCI_CON_HANDLE_INVALID) return;
+    ble.pair_step = 1;
+    ble.init_send_due_ms = now_ms() + 1;
+}
+
+void pair_aes_ready(void *) {
+    pair_crypto_pending = false;
+    if (pair_crypto_session != ble.session || ble.con_handle == HCI_CON_HANDLE_INVALID) return;
+    uint8_t difference = 0;
+    for (size_t i = 0; i < 16; ++i) difference |= pair_crypto_result[i] ^ ble.pair_expected[i];
+    if (difference != 0) {
+        disconnect_and_backoff("pair challenge verification failed");
+        return;
+    }
+    ble.pair_step = 3;
+    ble.init_send_due_ms = now_ms() + 5;
+}
+
+void send_pairing_step() {
+    uint8_t payload[17]{};
+    size_t len = 1;
+    switch (ble.pair_step) {
+        case 1: {
+            bd_addr_t local;
+            gap_local_bd_addr(local);
+            payload[1] = 2;
+            // Nintendo uses little-endian Bluetooth addresses on its vendor wire.
+            for (size_t i = 0; i < 6; ++i) payload[2 + i] = payload[8 + i] = local[5 - i];
+            payload[8] ^= 1;
+            len = 14;
+            break;
+        }
+        case 4: memcpy(payload + 1, ble.pair_random, 16); len = 17; break;
+        case 2: memcpy(payload + 1, ble.pair_random + 16, 16); len = 17; break;
+        case 3: break;
+        default: return;
+    }
+    const size_t command_len = ns2_gatt_build_pair_command(ble.command_buffer,
+        sizeof(ble.command_buffer), ble.pair_step, payload, len);
+    if (!command_len || !write_command(ble.command_buffer, static_cast<uint16_t>(command_len))) {
+        disconnect_and_backoff("pair command write failed");
+        return;
+    }
+    ble.pair_waiting_ack = true;
+    ble.pair_deadline_ms = now_ms() + INIT_ACK_TIMEOUT_MS;
+}
+
+void handle_pairing_ack(const uint8_t *data, uint16_t len) {
+    const uint8_t *payload;
+    if (!ble.pair_waiting_ack) return; // Duplicate ACK while crypto/save is pending.
+    if (!ns2_gatt_parse_pair_response(data, len, ble.pair_step, &payload)) {
+        disconnect_and_backoff("invalid pair ACK");
+        return;
+    }
+    ble.pair_waiting_ack = false;
+    switch (ble.pair_step) {
+        case 1: ble.pair_step = 4; break;
+        case 4:
+            for (size_t i = 0; i < 16; ++i) ble.pair_ltk[i] = ble.pair_random[i] ^ payload[i + 1];
+            ble.pair_step = 2;
+            break;
+        case 2:
+            memcpy(ble.pair_expected, payload + 1, 16);
+            for (size_t i = 0; i < 16; ++i) {
+                pair_crypto_key[i] = ble.pair_ltk[15 - i];
+                pair_crypto_plaintext[i] = ble.pair_random[31 - i];
+            }
+            pair_crypto_pending = true;
+            pair_crypto_session = ble.session;
+            btstack_crypto_aes128_encrypt(&pair_aes_request, pair_crypto_key,
+                pair_crypto_plaintext, pair_crypto_result, pair_aes_ready, nullptr);
+            return;
+        case 3: ble.pair_save_pending = true; return;
+        default: disconnect_and_backoff("unexpected pair ACK"); return;
+    }
+    ble.init_send_due_ms = now_ms() + 5;
+}
+
+bool persist_pairing() {
+    int index = current_peer_db_index();
+    sm_key_t irk{}, key{}, stored{};
+    uint8_t rand[8]{};
+    if (index < 0) index = le_device_db_add(ble.current_addr_type, ble.current_addr, irk);
+    if (index < 0) return false;
+    // BTstack's SM keys are big-endian; Nintendo's derived LTK is little-endian.
+    for (size_t i = 0; i < 16; ++i) key[i] = ble.pair_ltk[15 - i];
+    le_device_db_encryption_set(index, 0, rand, key, 16, 0, 0, 1);
+    int key_size = 0, secure = 0;
+    le_device_db_encryption_get(index, nullptr, nullptr, stored, &key_size, nullptr, nullptr, &secure);
+    return key_size == 16 && secure && memcmp(stored, key, 16) == 0;
+}
+
 void send_current_init_command() {
+    if (ble.init_index == 3) {
+        if (ble.pairing_required) {
+            if (!pair_crypto_pending) {
+                pair_crypto_pending = true;
+                pair_crypto_session = ble.session;
+                ble.pair_deadline_ms = now_ms() + INIT_ACK_TIMEOUT_MS;
+                btstack_crypto_random_generate(&pair_random_request, ble.pair_random,
+                    sizeof(ble.pair_random), pair_random_ready, nullptr);
+            }
+            return;
+        }
+        ++ble.init_index; // Never re-finalize pairing on an ordinary wake.
+    }
     if (ble.init_index >= ns2_gatt_init_command_count()) {
         printf("[NS2 GATT] controller init complete; enabling input notify\n");
         start_input_subscriptions();
@@ -816,7 +995,7 @@ void start_controller_init() {
 
     ble.gatt_stage = GattStage::Initializing;
     ble.init_index = 0;
-    send_current_init_command();
+    ble.init_send_due_ms = now_ms() + 5;
 }
 
 void handle_gatt_query_complete(uint8_t att_status) {
@@ -864,6 +1043,7 @@ void handle_gatt_query_complete(uint8_t att_status) {
             }
             if (!subscribe_next(Ns2GattRole::InputNotify)) {
                 ble.gatt_stage = GattStage::Ready;
+                ble.ready_since_ms = now_ms();
                 ns2_status_set_state(Ns2BleState::ConnectedNoNotify);
                 printf("[NS2 GATT] ready; waiting for live input notify\n");
             }
@@ -879,6 +1059,10 @@ void handle_gatt_query_complete(uint8_t att_status) {
 }
 
 void handle_notification(uint16_t value_handle, const uint8_t *value, uint16_t value_len) {
+    // HCI disconnect completes asynchronously; already queued notifications
+    // must not restore input or advance initialization on the retiring link.
+    if (ble.disconnect_pending || ble.manually_disconnected || ble.suspended) return;
+
     CharacteristicSlot *slot = find_char_by_value_handle(value_handle);
     if (!slot) {
         printf("[NS2 GATT] notify unknown handle=0x%04x len=%u\n", value_handle, value_len);
@@ -886,20 +1070,21 @@ void handle_notification(uint16_t value_handle, const uint8_t *value, uint16_t v
     }
 
     if (slot->role == Ns2GattRole::AckNotify) {
+        if (ble.pair_step != 0) {
+            handle_pairing_ack(value, value_len);
+            return;
+        }
         if (ble.gatt_stage == GattStage::Initializing) {
-            char hex[160];
-            format_hex(value, value_len > 48 ? 48 : static_cast<uint8_t>(value_len), hex, sizeof(hex));
             printf("[NS2 GATT] init ACK index=%u len=%u first=0x%02x\n",
                    static_cast<unsigned>(ble.init_index),
                    static_cast<unsigned>(value_len),
                    value_len > 0 ? value[0] : 0);
-            if (value_len > 0 && (value[0] == 0x15 || ble.init_index == 3)) {
-                printf("[NS2 GATT] init ACK hex=%s%s\n",
-                       hex,
-                       value_len > 48 ? " ..." : "");
-            }
+            if (ble.init_command_sent_ms == 0 || ble.init_index >= ns2_gatt_init_command_count()) return;
+            const Ns2InitCommand &expected = ns2_gatt_init_command(ble.init_index);
+            if (value_len < 4 || value[0] != expected.data[0] || value[3] != expected.data[3]) return;
+            ble.init_command_sent_ms = 0;
             ble.init_index++;
-            send_current_init_command();
+            ble.init_send_due_ms = now_ms() + 5;
         }
         return;
     }
@@ -916,8 +1101,10 @@ void handle_notification(uint16_t value_handle, const uint8_t *value, uint16_t v
                    ns2_input_kind_name(kind),
                    static_cast<unsigned>(value_len),
                    value_len > 0 ? value[0] : 0);
+            return;
         }
-        save_current_target_if_live("live input");
+        // Flash persistence belongs to the foreground tick, never this callback.
+        ble.save_target_pending = true;
         ns2_status_note_notify(value_len);
         if (ns2_status_get_state() != Ns2BleState::ConnectedLive) {
             printf("[NS2 BLE] live input notify started len=%u count=%lu\n",
@@ -929,12 +1116,17 @@ void handle_notification(uint16_t value_handle, const uint8_t *value, uint16_t v
 }
 
 void on_connected() {
+    ble.disconnect_pending = false;
     ble.connecting = false;
     ble.scanning = false;
     ble.pending_connect_valid = false;
     memcpy(ble.current_addr, ble.pending_addr, 6);
     ble.current_addr_type = ble.pending_addr_type;
     ble.current_addr_valid = true;
+    ++ble.session;
+    ble.pairing_required = ble.connect_mode == ConnectMode::PairingScan;
+    ns2_input_reset();
+    ble.ready_since_ms = 0;
     reset_retry_window();
     ns2_status_clear_error();
     ns2_status_note_connected(ble.pending_addr, ble.pending_addr_type);
@@ -950,22 +1142,24 @@ void on_connected() {
     }
 
     if (ble.connect_mode == ConnectMode::PairingScan) {
-        ble.security_pending = true;
-        ble.security_required = true;
-        ble.security_started_ms = now_ms();
         ns2_status_set_state(Ns2BleState::Pairing);
-        printf("[NS2 SM] explicit pair mode; requesting BLE bonding\n");
-        sm_request_pairing(ble.con_handle);
+        printf("[NS2] explicit pair mode; provisioning vendor LTK over GATT\n");
+        schedule_mtu_exchange(GATT_DISCOVERY_DELAY_MS);
         return;
     }
 
     if (saved_target_match) {
-        if (le_device_db_count() == 0) {
-            printf("[NS2 SM] saved target has no local bond; skipping MTU and using direct GATT reconnect path\n");
-            schedule_service_discovery(SAVED_RECONNECT_GATT_DELAY_MS);
+        if (!current_peer_has_ltk()) {
+            // Imported address-only configurations cannot recreate the controller's
+            // key. Preserve the address but require explicit controller-side pair.
+            disconnect_and_backoff("saved peer has no LTK; run ns2 pair");
             return;
         } else {
-            printf("[NS2 GATT] saved target connected with local bond; using direct GATT reconnect path\n");
+            ble.security_pending = true;
+            ble.security_required = true;
+            ble.security_started_ms = now_ms();
+            sm_request_pairing(ble.con_handle); // Existing vendor LTK causes re-encryption.
+            return;
         }
     }
     schedule_mtu_exchange(GATT_DISCOVERY_DELAY_MS);
@@ -975,6 +1169,11 @@ void on_connection_failed(uint8_t status) {
     printf("[NS2 BLE] connect failed status=0x%02x\n", status);
     ble.connecting = false;
     ble.pending_connect_valid = false;
+    if (ble.suspended || ble.manually_disconnected) {
+        reset_gatt_cache();
+        ns2_status_set_state(Ns2BleState::Idle);
+        return;
+    }
     char error[32];
     snprintf(error, sizeof(error), "conn fail 0x%02x", status);
     if (ble.connect_mode == ConnectMode::DirectSaved) {
@@ -1128,7 +1327,8 @@ void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, 
                 const uint8_t status = hci_subevent_le_connection_complete_get_status(packet);
                 if (status == ERROR_CODE_SUCCESS) {
                     const hci_con_handle_t handle = hci_subevent_le_connection_complete_get_connection_handle(packet);
-                    if (ble.suspended) {
+                    if (ble.suspended || ble.manually_disconnected ||
+                        !ble.pending_connect_valid || ble.con_handle != HCI_CON_HANDLE_INVALID) {
                         printf("[NS2 HCI] connected while suspended, disconnect handle=0x%04x\n", handle);
                         gap_disconnect(handle);
                         break;
@@ -1162,6 +1362,7 @@ void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, 
             const uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
             printf("[NS2 HCI] disconnected reason=0x%02x\n", reason);
             ble.con_handle = HCI_CON_HANDLE_INVALID;
+            ble.disconnect_pending = false;
             ble.connecting = false;
             ble.scanning = false;
             ble.current_addr_valid = false;
@@ -1169,6 +1370,14 @@ void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, 
             ble.security_required = false;
             ble.security_started_ms = 0;
             ns2_status_note_disconnected(reason);
+            ns2_input_reset();
+            ble.save_target_pending = false;
+            ble.ready_since_ms = 0;
+            if (ble.suspended || ble.manually_disconnected) {
+                reset_gatt_cache();
+                ns2_status_set_state(Ns2BleState::Idle);
+                break;
+            }
             if (ble.pair_required_after_disconnect) {
                 ble.pair_required_after_disconnect = false;
                 ble.connect_mode = ConnectMode::None;
@@ -1202,7 +1411,8 @@ void gatt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet,
     (void)channel;
     (void)size;
 
-    if (packet_type != HCI_EVENT_PACKET) {
+    if (packet_type != HCI_EVENT_PACKET || !packet || size < 4 ||
+        ble.con_handle == HCI_CON_HANDLE_INVALID || little_endian_read_16(packet, 2) != ble.con_handle) {
         return;
     }
 
@@ -1253,6 +1463,10 @@ void gatt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet,
         }
 
         case GATT_EVENT_QUERY_COMPLETE:
+            if (ble.rumble_write_pending && ble.gatt_stage == GattStage::Ready) {
+                ble.rumble_write_pending = false;
+                break;
+            }
             handle_gatt_query_complete(gatt_event_query_complete_get_att_status(packet));
             break;
 
@@ -1294,10 +1508,12 @@ void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, u
     const uint8_t event_type = hci_event_packet_get_type(packet);
     switch (event_type) {
         case SM_EVENT_JUST_WORKS_REQUEST:
+            if (sm_event_just_works_request_get_handle(packet) != ble.con_handle) break;
             printf("[NS2 SM] just works request; confirm\n");
             sm_just_works_confirm(sm_event_just_works_request_get_handle(packet));
             break;
         case SM_EVENT_NUMERIC_COMPARISON_REQUEST:
+            if (sm_event_numeric_comparison_request_get_handle(packet) != ble.con_handle) break;
             printf("[NS2 SM] numeric comparison request; confirm passkey=%lu\n",
                    static_cast<unsigned long>(sm_event_numeric_comparison_request_get_passkey(packet)));
             sm_numeric_comparison_confirm(sm_event_numeric_comparison_request_get_handle(packet));
@@ -1336,6 +1552,7 @@ void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, u
             printf("[NS2 SM] pairing started\n");
             break;
         case SM_EVENT_PAIRING_COMPLETE:
+            if (sm_event_pairing_complete_get_handle(packet) != ble.con_handle) break;
             printf("[NS2 SM] pairing complete status=0x%02x reason=0x%02x\n",
                    sm_event_pairing_complete_get_status(packet),
                    sm_event_pairing_complete_get_reason(packet));
@@ -1371,6 +1588,7 @@ void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, u
             printf("[NS2 SM] re-encryption started addr=%s\n", formatted);
             break;
         case SM_EVENT_REENCRYPTION_COMPLETE:
+            if (sm_event_reencryption_complete_get_handle(packet) != ble.con_handle) break;
             sm_event_reencryption_complete_get_address(packet, addr);
             ns2_format_addr(addr,
                             sm_event_reencryption_complete_get_addr_type(packet),
@@ -1381,17 +1599,21 @@ void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, u
                    formatted);
             print_le_db_summary();
             if (sm_event_reencryption_complete_get_status(packet) == ERROR_CODE_PIN_OR_KEY_MISSING) {
-                printf("[NS2 SM] key missing; deleting local bond and waiting for controller-side pairing\n");
-                gap_delete_bonding(static_cast<bd_addr_type_t>(sm_event_reencryption_complete_get_addr_type(packet)), addr);
+                printf("[NS2 SM] saved key rejected; explicit pairing may be required\n");
                 ble.security_pending = false;
                 ble.security_required = false;
                 ble.security_started_ms = 0;
+                disconnect_and_backoff("saved key rejected; retry or pair explicitly");
             } else if (ble.security_pending) {
                 ble.security_pending = false;
                 ble.security_started_ms = 0;
                 if (ble.con_handle != HCI_CON_HANDLE_INVALID) {
                     ble.security_required = false;
-                    schedule_mtu_exchange(GATT_DISCOVERY_DELAY_MS);
+                    if (sm_event_reencryption_complete_get_status(packet) == ERROR_CODE_SUCCESS) {
+                        schedule_mtu_exchange(GATT_DISCOVERY_DELAY_MS);
+                    } else {
+                        disconnect_and_backoff("saved peer re-encryption failed");
+                    }
                 }
             }
             break;
@@ -1455,7 +1677,47 @@ void ns2_ble_init_for_shared_hci() {
 void ns2_ble_tick() {
     const uint64_t now = now_ms();
 
-    if (ble.suspended) {
+    if (ble.forget_bond_pending && ble.con_handle == HCI_CON_HANDLE_INVALID && !ble.connecting) {
+        // Wait for the old link's security callbacks to drain before deleting.
+        gap_delete_bonding(static_cast<bd_addr_type_t>(ble.forget_addr_type), ble.forget_addr);
+        ble.forget_bond_pending = false;
+    }
+
+    if (ble.suspended || ble.manually_disconnected || ble.disconnect_pending) {
+        return;
+    }
+
+    if (ble.save_target_pending && ble.con_handle != HCI_CON_HANDLE_INVALID) {
+        ble.save_target_pending = false;
+        save_current_target_if_live("live input");
+        if (ble.target_saved_this_connection) ble.requested_mode = ConnectMode::None;
+    }
+
+    if (ble.pair_save_pending && ble.con_handle != HCI_CON_HANDLE_INVALID) {
+        ble.pair_save_pending = false;
+        if (!persist_pairing()) {
+            disconnect_and_backoff("vendor LTK persistence failed");
+            return;
+        }
+        ble.pairing_required = false;
+        ble.pair_step = 0;
+        ble.init_index = 4;
+        ble.init_send_due_ms = now + 5;
+        // Do not log the random material, LTK, or challenge response.
+        memset(ble.pair_random, 0, sizeof(ble.pair_random));
+        memset(ble.pair_ltk, 0, sizeof(ble.pair_ltk));
+    }
+
+    if (ble.con_handle != HCI_CON_HANDLE_INVALID && ble.gatt_stage == GattStage::Initializing &&
+        ble.init_send_due_ms != 0 && now >= ble.init_send_due_ms && !pair_crypto_pending) {
+        ble.init_send_due_ms = 0;
+        if (ble.pair_step != 0) send_pairing_step();
+        else send_current_init_command();
+    }
+    if (ble.con_handle != HCI_CON_HANDLE_INVALID && ble.pair_deadline_ms != 0 &&
+        now >= ble.pair_deadline_ms && (ble.pair_waiting_ack ||
+        (pair_crypto_pending && pair_crypto_session == ble.session))) {
+        disconnect_and_backoff("vendor pair timeout");
         return;
     }
 
@@ -1466,7 +1728,7 @@ void ns2_ble_tick() {
     }
 
     if (ble.hci_ready &&
-        ns2_config_auto_connect_enabled() &&
+        (ns2_config_auto_connect_enabled() || ble.requested_mode != ConnectMode::None) &&
         ble.auto_start_due_ms != 0 &&
         now >= ble.auto_start_due_ms &&
         ns2_status_get_state() == Ns2BleState::Idle) {
@@ -1475,7 +1737,7 @@ void ns2_ble_tick() {
     }
 
     if (ns2_status_get_state() == Ns2BleState::Backoff &&
-        ns2_config_auto_connect_enabled() &&
+        (ns2_config_auto_connect_enabled() || ble.requested_mode != ConnectMode::None) &&
         ble.next_retry_ms != 0 &&
         now >= ble.next_retry_ms) {
         start_auto_attempt();
@@ -1552,18 +1814,22 @@ void ns2_ble_tick() {
     if ((state == Ns2BleState::ConnectedNoNotify || state == Ns2BleState::ConnectedLive) &&
         !ns2_status_live_notify()) {
         const uint32_t age = ns2_status_last_notify_age_ms();
-        if (age != UINT32_MAX && age > NOTIFY_TIMEOUT_MS) {
+        if ((age != UINT32_MAX && age > NOTIFY_TIMEOUT_MS) ||
+            (age == UINT32_MAX && ble.ready_since_ms != 0 &&
+             now - ble.ready_since_ms > NOTIFY_TIMEOUT_MS)) {
             disconnect_and_backoff("notify timeout");
         }
     }
 }
 
 void ns2_ble_start_scan() {
-    ble.direct_saved_tried = true;
-    start_scan_internal(ConnectMode::ManualScan);
+    ns2_ble_pair();
 }
 
 void ns2_ble_pair() {
+    ble.manually_disconnected = false;
+    ble.suspended = false;
+    ble.requested_mode = ConnectMode::PairingScan;
     if (ble.scanning) {
         gap_stop_scan();
         ble.scanning = false;
@@ -1571,10 +1837,13 @@ void ns2_ble_pair() {
     if (ble.connecting) {
         gap_connect_cancel();
         ble.connecting = false;
+        ble.pending_connect_valid = false;
+        // LE cancel completes asynchronously. Retry after it has drained.
+        enter_backoff(nullptr);
+        return;
     }
     if (ble.con_handle != HCI_CON_HANDLE_INVALID) {
-        gap_disconnect(ble.con_handle);
-        ns2_status_set_last_error("disconnect first, retry pair");
+        disconnect_and_backoff(nullptr);
         return;
     }
     ble.direct_saved_tried = true;
@@ -1583,12 +1852,28 @@ void ns2_ble_pair() {
 }
 
 void ns2_ble_reconnect() {
+    ble.manually_disconnected = false;
+    ble.suspended = false;
+    ble.requested_mode = ConnectMode::ScanAuto;
+    if (!ns2_config_has_saved_target()) {
+        ble.requested_mode = ConnectMode::None;
+        ns2_status_set_last_error("no saved peer; run ns2 pair");
+        return;
+    }
     if (ble.scanning) {
         gap_stop_scan();
         ble.scanning = false;
     }
     if (ble.con_handle != HCI_CON_HANDLE_INVALID) {
-        gap_disconnect(ble.con_handle);
+        disconnect_and_backoff(nullptr);
+        return;
+    }
+    if (ble.connecting) {
+        gap_connect_cancel();
+        ble.connecting = false;
+        ble.pending_connect_valid = false;
+        enter_backoff(nullptr);
+        return;
     }
     ble.direct_saved_tried = false;
     reset_retry_window();
@@ -1597,6 +1882,13 @@ void ns2_ble_reconnect() {
 }
 
 void ns2_ble_disconnect() {
+    ble.manually_disconnected = true;
+    ble.requested_mode = ConnectMode::None;
+    ble.auto_start_due_ms = 0;
+    ble.next_retry_ms = 0;
+    ble.pending_connect_valid = false;
+    ble.save_target_pending = false;
+    ns2_input_reset();
     if (ble.scanning) {
         gap_stop_scan();
         ble.scanning = false;
@@ -1606,7 +1898,7 @@ void ns2_ble_disconnect() {
         ble.connecting = false;
     }
     if (ble.con_handle != HCI_CON_HANDLE_INVALID) {
-        gap_disconnect(ble.con_handle);
+        disconnect_and_backoff(nullptr);
     } else {
         ns2_status_clear_connection();
         ns2_status_set_state(Ns2BleState::Idle);
@@ -1617,6 +1909,9 @@ void ns2_ble_suspend_auto() {
     ble.suspended = true;
     ble.auto_start_due_ms = 0;
     ble.next_retry_ms = 0;
+    ble.pending_connect_valid = false;
+    ble.save_target_pending = false;
+    ns2_input_reset();
     if (ble.scanning) {
         gap_stop_scan();
         ble.scanning = false;
@@ -1626,7 +1921,7 @@ void ns2_ble_suspend_auto() {
         ble.connecting = false;
     }
     if (ble.con_handle != HCI_CON_HANDLE_INVALID) {
-        gap_disconnect(ble.con_handle);
+        disconnect_and_backoff(nullptr);
     } else {
         ns2_status_clear_error();
         ns2_status_clear_connection();
@@ -1640,7 +1935,7 @@ void ns2_ble_resume_auto() {
     ns2_status_clear_error();
     if (ble.con_handle == HCI_CON_HANDLE_INVALID && !ble.connecting && !ble.scanning) {
         ns2_status_set_state(Ns2BleState::Idle);
-        if (ns2_config_auto_connect_enabled()) {
+        if (ns2_config_auto_connect_enabled() && !ble.manually_disconnected) {
             ble.auto_start_due_ms = now_ms() + 100;
         }
     }
@@ -1652,11 +1947,14 @@ bool ns2_ble_connected() {
 }
 
 void ns2_ble_forget() {
+    ns2_ble_disconnect();
     uint8_t saved_addr[6];
     uint8_t saved_type = 0;
     if (ns2_config_has_saved_target()) {
         ns2_config_get_saved_target(saved_addr, &saved_type);
-        gap_delete_bonding(static_cast<bd_addr_type_t>(saved_type), saved_addr);
+        memcpy(ble.forget_addr, saved_addr, sizeof(ble.forget_addr));
+        ble.forget_addr_type = saved_type;
+        ble.forget_bond_pending = true;
     }
     ns2_config_forget_saved_target();
     (void)ns2_config_save();
@@ -1667,11 +1965,20 @@ void ns2_ble_set_auto_connect(bool enabled) {
     ns2_config_set_auto_connect(enabled);
     (void)ns2_config_save();
     if (enabled) {
+        ble.manually_disconnected = false;
+        ble.requested_mode = ConnectMode::None;
         ble.auto_start_due_ms = now_ms() + 100;
-    } else if (ns2_status_get_state() == Ns2BleState::Error ||
-               ns2_status_get_state() == Ns2BleState::Backoff) {
+    } else {
+        ble.requested_mode = ConnectMode::None;
+        ble.auto_start_due_ms = 0;
+        ble.next_retry_ms = 0;
+        if (ble.scanning) gap_stop_scan();
+        if (ble.connecting) gap_connect_cancel();
+        ble.scanning = false;
+        ble.connecting = false;
+        ble.pending_connect_valid = false;
         ns2_status_clear_error();
-        ns2_status_set_state(Ns2BleState::Idle);
+        if (ble.con_handle == HCI_CON_HANDLE_INVALID) ns2_status_set_state(Ns2BleState::Idle);
     }
 }
 
@@ -1680,28 +1987,32 @@ bool ns2_ble_auto_connect_enabled() {
 }
 
 bool ns2_ble_rumble_ready() {
-    return ble.con_handle != HCI_CON_HANDLE_INVALID && ble.rumble_value_handle != 0;
+    return ble.con_handle != HCI_CON_HANDLE_INVALID && ble.gatt_stage == GattStage::Ready &&
+           ble.rumble_value_handle != 0 && !ble.rumble_write_pending;
 }
 
 bool ns2_ble_send_rumble(const uint8_t *data, uint16_t len) {
-    if (!data || len == 0 || !ns2_ble_rumble_ready()) {
+    if (!data || len == 0 || len > sizeof(ble.rumble_packet) || !ns2_ble_rumble_ready()) {
         return false;
     }
 
+    // Write requests may retain the pointer until their completion callback.
+    memcpy(ble.rumble_packet, data, len);
     uint8_t status;
     if (ble.rumble_write_without_response) {
         status = gatt_client_write_value_of_characteristic_without_response(
             ble.con_handle,
             ble.rumble_value_handle,
             len,
-            const_cast<uint8_t *>(data));
+            ble.rumble_packet);
     } else {
         status = gatt_client_write_value_of_characteristic(
             gatt_packet_handler,
             ble.con_handle,
             ble.rumble_value_handle,
             len,
-            const_cast<uint8_t *>(data));
+            ble.rumble_packet);
+        ble.rumble_write_pending = status == ERROR_CODE_SUCCESS;
     }
     return status == ERROR_CODE_SUCCESS;
 }

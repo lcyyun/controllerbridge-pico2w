@@ -19,6 +19,14 @@ struct Ns2InputSnapshot {
     uint16_t len;
     uint8_t first_byte;
     uint32_t updates;
+    // Physical report counter; never derived from USB sends or control changes.
+    uint32_t source_sequence;
+    bool source_sequence_valid;
+    bool fresh;
+    uint32_t unique_updates;
+    uint32_t duplicate_updates;
+    int16_t battery_percent; // -1 when the selected input format has no percentage.
+    uint16_t battery_mv;     // FD2 voltage; zero when unavailable.
     uint32_t parse_errors;
     uint32_t buttons;
     uint16_t lx;

@@ -1,5 +1,7 @@
 # Root project output only; do not hide files in imported vendor snapshots.
 /build/
+/.deps/
+/tests/.out/
 /build-*/
 /build_*/
 /artifacts/

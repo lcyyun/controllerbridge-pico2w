@@ -286,6 +286,10 @@ bool parse_fd2(const uint8_t *data, uint16_t len, Ns2InputSnapshot *out) {
     if (len < 16) {
         return false;
     }
+    out->source_sequence = read_le32(data);
+    out->source_sequence_valid = true;
+    out->battery_percent = -1; // Voltage is not a calibrated charge percentage.
+    out->battery_mv = len >= 33 ? static_cast<uint16_t>(data[31] | (data[32] << 8)) : 0;
     out->buttons = decode_fd2_buttons(read_le32(data + 4));
     apply_axes(&fd2_axis,
                out,
@@ -308,6 +312,11 @@ bool parse_legacy(const uint8_t *data, uint16_t len, Ns2InputSnapshot *out) {
     if (len < 11) {
         return false;
     }
+    out->source_sequence = data[0];
+    out->source_sequence_valid = true;
+    const uint8_t level = (data[1] >> 2) & 0x0f;
+    out->battery_percent = level <= 9 ? static_cast<int16_t>((level * 100 + 4) / 9) : -1;
+    out->battery_mv = 0;
     out->buttons = decode_legacy_buttons(data[2], data[3], data[4]);
     apply_axes(&legacy_axis,
                out,
@@ -322,6 +331,7 @@ bool parse_legacy(const uint8_t *data, uint16_t len, Ns2InputSnapshot *out) {
 
 void ns2_input_reset() {
     memset(&input, 0, sizeof(input));
+    input.battery_percent = -1;
     input.lx = CENTER_12BIT;
     input.ly = CENTER_12BIT;
     input.rx = CENTER_12BIT;
@@ -350,11 +360,31 @@ bool ns2_input_parse_notify(Ns2InputReportKind kind, const uint8_t *data, uint16
         return false;
     }
 
+    if (kind == Ns2InputReportKind::Unknown) {
+        kind = len >= 16 ? Ns2InputReportKind::Fd2 : Ns2InputReportKind::Legacy;
+    }
+    const uint16_t minimum = kind == Ns2InputReportKind::Fd2 ? 16 : 11;
+    if (len < minimum) {
+        input.parse_errors++;
+        return false;
+    }
+    const uint32_t sequence = kind == Ns2InputReportKind::Fd2 ? read_le32(data) : data[0];
+    if (input.valid && input.kind == kind && input.source_sequence_valid &&
+        input.source_sequence == sequence) {
+        // A repeated source frame must not advance calibration or motion state.
+        input.updates++;
+        input.duplicate_updates++;
+        input.fresh = false;
+        if (input_callback) input_callback(&input);
+        return true;
+    }
+
     Ns2InputSnapshot next = input;
     next.valid = false;
     next.kind = kind;
     next.len = len;
     next.first_byte = data[0];
+    next.source_sequence_valid = false;
     next.raw_valid = true;
     next.raw_len = len > NS2_INPUT_RAW_REPORT_MAX ? NS2_INPUT_RAW_REPORT_MAX : len;
     memcpy(next.raw, data, next.raw_len);
@@ -387,6 +417,10 @@ bool ns2_input_parse_notify(Ns2InputReportKind kind, const uint8_t *data, uint16
 
     next.valid = true;
     next.updates = input.updates + 1;
+    next.fresh = !input.valid || next.kind != input.kind ||
+                 !input.source_sequence_valid || next.source_sequence != input.source_sequence;
+    next.unique_updates = input.unique_updates + (next.fresh ? 1u : 0u);
+    next.duplicate_updates = input.duplicate_updates + (next.fresh ? 0u : 1u);
     next.parse_errors = input.parse_errors;
     input = next;
     if (input_callback) {
