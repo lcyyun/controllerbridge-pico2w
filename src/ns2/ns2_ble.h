@@ -12,7 +12,10 @@ void ns2_ble_pair();
 void ns2_ble_reconnect();
 void ns2_ble_disconnect();
 void ns2_ble_suspend_auto();
-void ns2_ble_resume_auto();
+// Passive profile recovery preserves manual disconnect; an explicit source
+// selection may re-arm it, while still respecting the saved auto-connect flag.
+void ns2_ble_resume_auto(bool user_requested = false);
+void ns2_ble_cancel_manual_request();
 void ns2_ble_forget();
 void ns2_ble_set_auto_connect(bool enabled);
 bool ns2_ble_auto_connect_enabled();

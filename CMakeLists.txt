@@ -138,6 +138,7 @@ else ()
         if (ENABLE_AUTO_PROFILE)
                 target_sources(ds5-bridge PRIVATE
                         src/bridge_runtime.cpp
+                        src/bridge_connection_control.cpp
                         src/bridge_store.cpp
                         src/xinput_usb.cpp
                         src/bridge_features.cpp

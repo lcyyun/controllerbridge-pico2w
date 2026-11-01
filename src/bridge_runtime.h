@@ -20,6 +20,12 @@ void bridge_runtime_defaults();
 uint8_t bridge_runtime_role();
 void bridge_runtime_set_role(uint8_t role);
 uint8_t bridge_runtime_preference();
+// Pair/reconnect targets are session-only and must never enter saved settings.
+uint8_t bridge_runtime_connection_target();
+uint8_t bridge_runtime_effective_preference();
+bool bridge_runtime_begin_connection(uint8_t source, uint32_t now_ms);
+void bridge_runtime_clear_connection();
+bool bridge_runtime_connection_tick(uint32_t now_ms, bool profile_locked);
 void bridge_runtime_set_preference(uint8_t preference);
 // Platform storage is supplied by bridge_store.cpp (host tests use memory).
 bool bridge_store_load(uint8_t *wire, size_t size);

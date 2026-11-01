@@ -31,6 +31,7 @@
 #if ENABLE_AUTO_PROFILE
 #include "profiles/auto_usb.h"
 #include "bridge_runtime.h"
+#include "bridge_connection_control.h"
 #include "xinput_usb.h"
 #include "bridge_features.h"
 #include "profiles/auto_profile.h"
@@ -116,20 +117,19 @@ static bool active_profile_connected() {
 }
 
 static void reset_auto_session(const char *reason) {
-    if (!auto_profile_locked()) {
-        return;
-    }
-
     printf("[AUTO] session ended; return to detect reason=%s\n", reason ? reason : "unknown");
     profile_lock_applied = false;
-    auto_profile_reset_detection(reason);
-    bridge_runtime_reset_input();
+    bridge_connection_reset(reason);
     ns2_usb_set_motors(0, 0);
     output_pending = false; feedback_stop_ms = 0;
     state_init();
     audio_reset_session(false);
-    bt_set_classic_enabled(bridge_runtime_preference() != 2);
-    if (bridge_runtime_preference() != 1) ns2_ble_resume_auto();
+}
+
+static void begin_manual_connection(uint8_t source, const char *reason) {
+    reset_auto_session(reason);
+    bridge_runtime_begin_connection(source, to_ms_since_boot(get_absolute_time()));
+    bridge_connection_apply();
 }
 
 static void apply_profile_lock_actions() {
@@ -155,6 +155,8 @@ static void auto_session_tick() {
         reset_auto_session(auto_profile_active() == BridgeProfileId::Ds5FastPath ?
                            "ds5_disconnected" :
                            "ns2_disconnected");
+    } else if (bridge_runtime_connection_tick(to_ms_since_boot(get_absolute_time()), auto_profile_locked())) {
+        reset_auto_session("connection_attempt_timeout");
     }
 }
 
@@ -317,6 +319,7 @@ static void format_auto_status_json(char *out, size_t out_len) {
     if (len && out[len - 1] == '}') {
         snprintf(out + len - 1, out_len - len + 1,
                  ",\"firmware\":\"%s\",\"role\":\"%s\",\"usb_role\":\"%s\",\"input_preference\":\"%s\","
+                 "\"connection_target\":\"%s\",\"ns2_state\":\"%s\",\"ns2_auto_enabled\":%s,\"ns2_connect_attempts\":%lu,\"ns2_last_disconnect_reason\":%u,"
                  "\"ds5_connected\":%s,\"ds5_saved\":%s,\"ds5_pairing\":%s,\"ns2_connected\":%s,\"ns2_saved\":%s,\"ns2_scanning\":%s,"
                  "\"usb_mounted\":%s,\"mounted\":%s,\"suspended\":%s,\"report_rate_hz\":%u,\"sys_clock_khz\":%lu,"
                  "\"rumble_enabled\":%s,\"rumble_scale_percent\":%u,\"rumble_hold_ms\":%u,\"rumble_tick_ms\":%u,\"rumble_stop_packets\":%u,"
@@ -329,6 +332,9 @@ static void format_auto_status_json(char *out, size_t out_len) {
                  "\"audio_haptic_blocks\":%lu,\"audio_ns2_updates\":%lu,\"audio_ns2_stops\":%lu,\"audio_ns2_mixed_ticks\":%lu}",
                  PICO_PROGRAM_VERSION_STRING, role, role,
                  bridge_runtime_preference() == 1 ? "ds5" : bridge_runtime_preference() == 2 ? "ns2pro" : "auto",
+                 bridge_runtime_connection_target() == 1 ? "ds5" : bridge_runtime_connection_target() == 2 ? "ns2pro" : "none",
+                 ns2_ble_state_name(ns2_status_get_state()), ns2_ble_auto_connect_enabled() ? "true" : "false",
+                 (unsigned long)ns2_status_connect_attempts(), ns2_status_last_disconnect_reason(),
                  bt_classic_connected() ? "true" : "false", bt_has_saved_peer() ? "true" : "false", bt_pairing_active() ? "true" : "false",
                  ns2_ble_connected() ? "true" : "false", ns2_config_has_saved_target() ? "true" : "false",
                  ns2_status_get_state() == Ns2BleState::Scanning ? "true" : "false", tud_mounted() ? "true" : "false",
@@ -390,8 +396,7 @@ static bool handle_auto_command_json(const char *raw_line, char *out, size_t out
         if (selected == 255) { snprintf(out,out_len,"{\"ok\":false,\"error\":\"invalid_source\"}"); return true; }
         bridge_runtime_set_preference(selected);
         reset_auto_session("source_change");
-        bt_set_classic_enabled(selected != 2);
-        if (selected == 1) ns2_ble_suspend_auto(); else ns2_ble_resume_auto();
+        bridge_connection_apply(true);
         format_auto_status_json(out,out_len); return true;
     }
     if (strcmp(line,"settings save") == 0) {
@@ -407,8 +412,7 @@ static bool handle_auto_command_json(const char *raw_line, char *out, size_t out
         if (had_target) ns2_config_set_saved_target(saved_ns2.saved_addr,saved_ns2.saved_addr_type,saved_ns2.last_success_boot_counter);
         ns2_usb_init(); reset_auto_session("settings_reset");
         bridge_runtime_reset_input();
-        bt_set_classic_enabled(true);
-        ns2_ble_resume_auto();
+        bridge_connection_apply(true);
         auto_usb_request_identity(BridgeUsbIdentity::SonyDs5,"settings_reset");
         const bool ok = bridge_runtime_save() && config_save() && ns2_config_save();
         snprintf(out,out_len,"{\"ok\":%s}",ok ? "true":"false"); return true;
@@ -418,13 +422,15 @@ static bool handle_auto_command_json(const char *raw_line, char *out, size_t out
         snprintf(out,out_len,"{\"ok\":true,\"reboot\":true}"); return true;
     }
     if (strcmp(line,"ds5 pair") == 0 || strcmp(line,"ds5 reconnect") == 0) {
-        bridge_runtime_set_preference(1); reset_auto_session("ds5_connect"); ns2_ble_suspend_auto(); bt_set_classic_enabled(true);
+        begin_manual_connection(1, "ds5_connect");
         if (strcmp(line,"ds5 pair") == 0) bt_pair(); else bt_reconnect();
         format_auto_status_json(out,out_len); return true;
     }
     if (strcmp(line,"ds5 disconnect") == 0 || strcmp(line,"ds5 forget") == 0) {
+        const bool selected = bridge_connection_source_selected(1);
         if (strcmp(line,"ds5 forget") == 0) bt_forget(); else bt_disconnect();
-        bridge_runtime_reset_input(); format_auto_status_json(out,out_len); return true;
+        if (selected) reset_auto_session("ds5_manual_disconnect");
+        format_auto_status_json(out,out_len); return true;
     }
     if ((strcmp(line,"rumble test left") == 0 || strcmp(line,"rumble test right") == 0 ||
          strcmp(line,"rumble test both") == 0 || strcmp(line,"rumble stop") == 0) &&
@@ -466,35 +472,38 @@ static bool handle_auto_command_json(const char *raw_line, char *out, size_t out
         return true;
     }
     if (strcmp(line, "ns2 scan") == 0) {
-        bridge_runtime_set_preference(2); reset_auto_session("ns2_connect"); bt_set_classic_enabled(false);
-        ns2_ble_resume_auto();
+        begin_manual_connection(2, "ns2_scan");
         ns2_ble_start_scan();
         format_auto_status_json(out, out_len);
         return true;
     }
+    if (strcmp(line, "ns2 status") == 0) {
+        ns2_status_format_json(out, out_len);
+        return true;
+    }
     if (strcmp(line, "ns2 pair") == 0) {
-        bridge_runtime_set_preference(2); reset_auto_session("ns2_connect"); bt_set_classic_enabled(false);
-        ns2_ble_resume_auto();
+        begin_manual_connection(2, "ns2_pair");
         ns2_ble_pair();
         format_auto_status_json(out, out_len);
         return true;
     }
     if (strcmp(line, "ns2 reconnect") == 0) {
-        bridge_runtime_set_preference(2); reset_auto_session("ns2_connect"); bt_set_classic_enabled(false);
-        ns2_ble_resume_auto();
+        begin_manual_connection(2, "ns2_reconnect");
         ns2_ble_reconnect();
         format_auto_status_json(out, out_len);
         return true;
     }
     if (strcmp(line, "ns2 disconnect") == 0) {
+        const bool selected = bridge_connection_source_selected(2);
         ns2_ble_disconnect();
-        bridge_runtime_reset_input();
+        if (selected) reset_auto_session("ns2_manual_disconnect");
         format_auto_status_json(out, out_len);
         return true;
     }
     if (strcmp(line, "ns2 forget") == 0) {
+        const bool selected = bridge_connection_source_selected(2);
         ns2_ble_forget();
-        bridge_runtime_reset_input();
+        if (selected) reset_auto_session("ns2_forget");
         format_auto_status_json(out, out_len);
         return true;
     }
@@ -1099,8 +1108,7 @@ int main() {
     ns2_input_register_callback(on_ns2_input_auto);
     ns2_ble_init_for_shared_hci();
     ns2_usb_init();
-    bt_set_classic_enabled(bridge_runtime_preference() != 2);
-    if (bridge_runtime_preference() == 1) ns2_ble_suspend_auto();
+    bridge_connection_apply();
     auto_usb_request_identity(static_cast<BridgeUsbIdentity>(bridge_runtime_role()),"boot");
 #endif
 

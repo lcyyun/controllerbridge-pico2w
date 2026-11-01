@@ -6,6 +6,9 @@ namespace {
 bl616_bridge_input_state_t physical{};
 bl616_bridge_mapping_profiles_t mappings{};
 uint8_t role = 1, preference = 0, sequence = 0;
+uint8_t connection_target = 0;
+uint32_t connection_started_ms = 0;
+constexpr uint32_t connection_attempt_ms = 60000;
 uint32_t unique_reports = 0, epoch = 0, last_fresh_ms = 0, last_source_sequence = 0;
 bool has_sequence = false, rate_supported = false, dirty = false;
 uint8_t native[64]{};
@@ -34,7 +37,7 @@ bool note(bl616_bridge_input_state_t state, uint32_t source_sequence, bool suppo
 
 void bridge_runtime_defaults() {
     bl616_bridge_mapping_profiles_defaults(&mappings);
-    role = 1; preference = 0; dirty = true;
+    role = 1; preference = 0; connection_target = 0; dirty = true;
 }
 void bridge_runtime_init() {
     bridge_runtime_defaults();
@@ -57,12 +60,31 @@ void bridge_runtime_reset_input() {
     native_size = 0; has_sequence = false; rate_supported = false;
     ++epoch;
 }
-bool bridge_runtime_accepts(uint8_t source) { return preference == 0 || preference == source; }
+bool bridge_runtime_accepts(uint8_t source) {
+    const uint8_t selected = bridge_runtime_effective_preference();
+    return selected == 0 || selected == source;
+}
 uint8_t bridge_runtime_role() { return role; }
 void bridge_runtime_set_role(uint8_t value) { if (value >= 1 && value <= 4) { role = value; dirty = true; } }
 uint8_t bridge_runtime_preference() { return preference; }
+uint8_t bridge_runtime_connection_target() { return connection_target; }
+uint8_t bridge_runtime_effective_preference() { return connection_target ? connection_target : preference; }
+bool bridge_runtime_begin_connection(uint8_t source, uint32_t now_ms) {
+    if (source != 1 && source != 2) return false;
+    connection_target = source; connection_started_ms = now_ms;
+    bridge_runtime_reset_input();
+    return true;
+}
+void bridge_runtime_clear_connection() { connection_target = 0; }
+bool bridge_runtime_connection_tick(uint32_t now_ms, bool profile_locked) {
+    if (!connection_target || profile_locked ||
+        static_cast<uint32_t>(now_ms - connection_started_ms) < connection_attempt_ms) return false;
+    bridge_runtime_clear_connection();
+    bridge_runtime_reset_input();
+    return true;
+}
 void bridge_runtime_set_preference(uint8_t value) {
-    if (value <= 2) { preference = value; dirty = true; bridge_runtime_reset_input(); }
+    if (value <= 2) { preference = value; connection_target = 0; dirty = true; bridge_runtime_reset_input(); }
 }
 bool bridge_runtime_live(uint32_t now) { return physical.valid && (uint32_t)(now - last_fresh_ms) < stale_ms; }
 void bridge_runtime_ds5(const uint8_t *body, size_t len, uint32_t now) {

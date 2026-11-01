@@ -23,6 +23,10 @@ void bt_write(const uint8_t *data, uint16_t len);
 bool bt_try_write(const uint8_t *data, uint16_t len);
 void bt_get_signal_strength(int8_t *rssi);
 void bt_set_classic_enabled(bool enabled);
+// Explicit user selection of Auto/DS5 resumes automatic discovery without
+// deleting the bond. Internal profile arbitration preserves manual disconnect.
+void bt_resume_auto();
+void bt_cancel_manual_request();
 bool bt_classic_connected();
 void bt_tick();
 void bt_pair();

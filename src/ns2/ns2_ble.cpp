@@ -116,6 +116,7 @@ struct BleRuntime {
     uint8_t forget_addr[6];
     uint8_t forget_addr_type;
     bool save_target_pending;
+    bool saved_target_dirty;
     bool pairing_required;
     bool pair_save_pending;
     bool pair_waiting_ack;
@@ -153,6 +154,7 @@ struct BleRuntime {
     uint64_t next_retry_ms;
     uint64_t last_rssi_poll_ms;
     uint64_t ready_since_ms;
+    uint64_t target_save_due_ms;
 
     ServiceSlot services[MAX_SERVICES];
     CharacteristicSlot chars[MAX_CHARS];
@@ -259,6 +261,19 @@ void print_le_db_summary() {
     }
 }
 
+void note_hci_ready() {
+    if (ble.hci_ready) return;
+    ble.hci_ready = true;
+    bd_addr_t local_addr;
+    gap_local_bd_addr(local_addr);
+    ns2_gatt_set_console_mac(local_addr);
+    ns2_status_set_local_addr(local_addr);
+    printf("[NS2 HCI] local addr=%s\n", bd_addr_to_str(local_addr));
+    print_le_db_summary();
+    ns2_status_set_state(Ns2BleState::Idle);
+    ble.auto_start_due_ms = now_ms() + AUTO_START_DELAY_MS;
+}
+
 void configure_fast_connection_parameters() {
     gap_set_connection_parameters(SCAN_INTERVAL,
                                   SCAN_WINDOW,
@@ -299,7 +314,8 @@ void save_current_target_if_live(const char *reason) {
     const bool has_saved = ns2_config_has_saved_target();
     if (has_saved) {
         ns2_config_get_saved_target(saved_addr, &saved_type);
-        if (ns2_addr_equal(saved_addr, ble.current_addr) && saved_type == ble.current_addr_type) {
+        if (!ble.saved_target_dirty && ns2_addr_equal(saved_addr, ble.current_addr) &&
+            saved_type == ble.current_addr_type) {
             ble.target_saved_this_connection = true;
             return;
         }
@@ -311,6 +327,9 @@ void save_current_target_if_live(const char *reason) {
                                 ble.current_addr_type,
                                 static_cast<uint32_t>(now_ms()));
     const bool ok = ns2_config_save();
+    ble.saved_target_dirty = !ok;
+    ble.target_save_due_ms = ok ? 0 : now_ms() + 1000;
+    ble.save_target_pending = !ok;
     ble.target_saved_this_connection = ok;
     printf("[NS2 BLE] saved target after %s addr=%s ok=%u\n",
            reason ? reason : "live",
@@ -1169,7 +1188,8 @@ void on_connection_failed(uint8_t status) {
     printf("[NS2 BLE] connect failed status=0x%02x\n", status);
     ble.connecting = false;
     ble.pending_connect_valid = false;
-    if (ble.suspended || ble.manually_disconnected) {
+    if (ble.suspended || ble.manually_disconnected ||
+        (!ns2_config_auto_connect_enabled() && ble.requested_mode == ConnectMode::None)) {
         reset_gatt_cache();
         ns2_status_set_state(Ns2BleState::Idle);
         return;
@@ -1188,7 +1208,8 @@ void maybe_connect_from_advertisement(const uint8_t addr[6],
                                       uint8_t addr_type,
                                       int8_t rssi,
                                       bool candidate,
-                                      const char *reason) {
+                                      const char *reason,
+                                      bool pairing_advertisement = false) {
     if (!ble.scanning || ble.connecting || ble.con_handle != HCI_CON_HANDLE_INVALID) {
         return;
     }
@@ -1202,7 +1223,12 @@ void maybe_connect_from_advertisement(const uint8_t addr[6],
     }
 
     if (ble.connect_mode != ConnectMode::PairingScan && saved_match) {
-        start_connect(addr, addr_type, ble.connect_mode, "saved-scan");
+        // A saved controller in sync mode has cleared its advertised host.
+        // Like BL616, choose provisioning from that advertisement, not solely
+        // from the UI's scan mode. Ordinary bound wake still uses the saved LTK.
+        start_connect(addr, addr_type,
+                      pairing_advertisement ? ConnectMode::PairingScan : ble.connect_mode,
+                      pairing_advertisement ? "saved-pairing" : "saved-scan");
         return;
     }
 
@@ -1287,7 +1313,7 @@ void handle_advertising_report(uint8_t *packet) {
         ble.adv_log_count++;
     }
 
-    maybe_connect_from_advertisement(addr, addr_type, rssi, candidate, reason);
+    maybe_connect_from_advertisement(addr, addr_type, rssi, candidate, reason, adv.ns2_pairing_mfg);
 }
 
 void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
@@ -1304,15 +1330,7 @@ void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, 
             const uint8_t state = btstack_event_state_get_state(packet);
             printf("[NS2 HCI] state=%u\n", state);
             if (state == HCI_STATE_WORKING) {
-                ble.hci_ready = true;
-                bd_addr_t local_addr;
-                gap_local_bd_addr(local_addr);
-                ns2_gatt_set_console_mac(local_addr);
-                ns2_status_set_local_addr(local_addr);
-                printf("[NS2 HCI] local addr=%s\n", bd_addr_to_str(local_addr));
-                print_le_db_summary();
-                ns2_status_set_state(Ns2BleState::Idle);
-                ble.auto_start_due_ms = now_ms() + AUTO_START_DELAY_MS;
+                note_hci_ready();
             }
             break;
         }
@@ -1321,12 +1339,13 @@ void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, 
             handle_advertising_report(packet);
             break;
 
-        case HCI_EVENT_LE_META: {
-            const uint8_t subevent = hci_event_le_meta_get_subevent_code(packet);
-            if (subevent == HCI_SUBEVENT_LE_CONNECTION_COMPLETE) {
-                const uint8_t status = hci_subevent_le_connection_complete_get_status(packet);
+        case HCI_EVENT_META_GAP: {
+            // BTstack normalizes legacy and enhanced connection completions.
+            // Handling only the raw legacy event loses enhanced reconnects.
+            if (hci_event_gap_meta_get_subevent_code(packet) == GAP_SUBEVENT_LE_CONNECTION_COMPLETE) {
+                const uint8_t status = gap_subevent_le_connection_complete_get_status(packet);
                 if (status == ERROR_CODE_SUCCESS) {
-                    const hci_con_handle_t handle = hci_subevent_le_connection_complete_get_connection_handle(packet);
+                    const hci_con_handle_t handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
                     if (ble.suspended || ble.manually_disconnected ||
                         !ble.pending_connect_valid || ble.con_handle != HCI_CON_HANDLE_INVALID) {
                         printf("[NS2 HCI] connected while suspended, disconnect handle=0x%04x\n", handle);
@@ -1336,14 +1355,19 @@ void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, 
                     ble.con_handle = handle;
                     printf("[NS2 HCI] connected handle=0x%04x interval=%u latency=%u supervision=%u\n",
                            ble.con_handle,
-                           hci_subevent_le_connection_complete_get_conn_interval(packet),
-                           hci_subevent_le_connection_complete_get_conn_latency(packet),
-                           hci_subevent_le_connection_complete_get_supervision_timeout(packet));
+                           gap_subevent_le_connection_complete_get_conn_interval(packet),
+                           gap_subevent_le_connection_complete_get_conn_latency(packet),
+                           gap_subevent_le_connection_complete_get_supervision_timeout(packet));
                     on_connected();
                 } else {
                     on_connection_failed(status);
                 }
-            } else if (subevent == HCI_SUBEVENT_LE_CONNECTION_UPDATE_COMPLETE) {
+            }
+            break;
+        }
+
+        case HCI_EVENT_LE_META: {
+            if (hci_event_le_meta_get_subevent_code(packet) == HCI_SUBEVENT_LE_CONNECTION_UPDATE_COMPLETE) {
                 printf("[NS2 HCI] conn update complete status=0x%02x handle=0x%04x interval=%u latency=%u supervision=%u\n",
                        hci_subevent_le_connection_update_complete_get_status(packet),
                        hci_subevent_le_connection_update_complete_get_connection_handle(packet),
@@ -1373,7 +1397,8 @@ void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, 
             ns2_input_reset();
             ble.save_target_pending = false;
             ble.ready_since_ms = 0;
-            if (ble.suspended || ble.manually_disconnected) {
+            if (ble.suspended || ble.manually_disconnected ||
+                (!ns2_config_auto_connect_enabled() && ble.requested_mode == ConnectMode::None)) {
                 reset_gatt_cache();
                 ns2_status_set_state(Ns2BleState::Idle);
                 break;
@@ -1661,8 +1686,8 @@ void ns2_ble_init_common(bool shared_hci) {
 
     if (!shared_hci) {
         hci_power_control(HCI_POWER_ON);
-    } else if (ns2_config_auto_connect_enabled()) {
-        ble.auto_start_due_ms = now_ms() + AUTO_START_DELAY_MS;
+    } else if (hci_get_state() == HCI_STATE_WORKING) {
+        note_hci_ready();
     }
 }
 
@@ -1687,7 +1712,8 @@ void ns2_ble_tick() {
         return;
     }
 
-    if (ble.save_target_pending && ble.con_handle != HCI_CON_HANDLE_INVALID) {
+    if (ble.save_target_pending && ble.con_handle != HCI_CON_HANDLE_INVALID &&
+        now >= ble.target_save_due_ms) {
         ble.save_target_pending = false;
         save_current_target_if_live("live input");
         if (ble.target_saved_this_connection) ble.requested_mode = ConnectMode::None;
@@ -1701,6 +1727,11 @@ void ns2_ble_tick() {
         }
         ble.pairing_required = false;
         ble.pair_step = 0;
+        // The controller has now committed its host and key. Save the target
+        // before input setup: a dropped link must retry bound advertisements,
+        // even if no first input notification was received on this connection.
+        ble.requested_mode = ConnectMode::None;
+        save_current_target_if_live("vendor pairing");
         ble.init_index = 4;
         ble.init_send_due_ms = now + 5;
         // Do not log the random material, LTK, or challenge response.
@@ -1722,8 +1753,7 @@ void ns2_ble_tick() {
     }
 
     if (!ble.hci_ready && hci_get_state() == HCI_STATE_WORKING) {
-        ble.hci_ready = true;
-        ns2_status_set_state(Ns2BleState::Idle);
+        note_hci_ready();
         printf("[NS2 HCI] shared HCI already working\n");
     }
 
@@ -1930,7 +1960,8 @@ void ns2_ble_suspend_auto() {
     printf("[NS2 BLE] suspended by active profile\n");
 }
 
-void ns2_ble_resume_auto() {
+void ns2_ble_resume_auto(bool user_requested) {
+    if (user_requested) ble.manually_disconnected = false;
     ble.suspended = false;
     ns2_status_clear_error();
     if (ble.con_handle == HCI_CON_HANDLE_INVALID && !ble.connecting && !ble.scanning) {
@@ -1940,6 +1971,34 @@ void ns2_ble_resume_auto() {
         }
     }
     printf("[NS2 BLE] resumed by auto detect\n");
+}
+
+void ns2_ble_cancel_manual_request() {
+    const bool manual_request = ble.requested_mode != ConnectMode::None;
+    ble.requested_mode = ConnectMode::None;
+    if (!manual_request || (ble.con_handle != HCI_CON_HANDLE_INVALID &&
+                           ns2_status_get_state() == Ns2BleState::ConnectedLive)) return;
+
+    ble.auto_start_due_ms = 0;
+    ble.next_retry_ms = 0;
+    ble.pending_connect_valid = false;
+    if (ble.scanning) {
+        gap_stop_scan();
+        ble.scanning = false;
+    }
+    if (ble.connecting) {
+        gap_connect_cancel();
+        ble.connecting = false;
+    }
+    if (ble.con_handle != HCI_CON_HANDLE_INVALID) {
+        disconnect_and_backoff(nullptr);
+    } else if (ns2_config_auto_connect_enabled() && !ble.suspended && !ble.manually_disconnected) {
+        // Drain asynchronous scan/connect cancellation before the auto retry.
+        enter_backoff(nullptr);
+    } else {
+        reset_gatt_cache();
+        ns2_status_set_state(Ns2BleState::Idle);
+    }
 }
 
 bool ns2_ble_connected() {

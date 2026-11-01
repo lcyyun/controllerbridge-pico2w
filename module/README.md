@@ -1,7 +1,7 @@
 # Pico firmware module
 
 `module.json` is the firmware-owned Runtime API 2 contract for
-`pico-unified-bridge` 0.2.0-preview.1. It declares real DS5, Edge, XInput and
+`pico-unified-bridge` 0.2.1-preview.1. It declares real DS5, Edge, XInput and
 NS2Pro identities, independent physical input selection, two 25-control
 mapping profiles, and settings/recovery operations.
 
@@ -12,7 +12,7 @@ UF2 (PowerShell 7.2+):
 ./module/package.ps1 -Uf2Path ./artifacts/unified/controllerbridge-pico2w-unified.uf2
 ```
 
-Output: `dist/modules/pico-unified-bridge-0.2.0-preview.1.cbmodule`.
+Output: `dist/modules/pico-unified-bridge-0.2.1-preview.1.cbmodule`.
 Packaging never builds, flashes or accesses a serial port. Existing versions
 are never overwritten. It validates UF2 blocks, schema, paths and required
 payloads, includes LICENSE/NOTICE/LICENSES, generates MODULE-SHA256.txt, then

@@ -57,5 +57,34 @@ int main() {
     assert(!bridge_runtime_report(BL616_BRIDGE_ROLE_DUALSENSE,nullptr,64,656));
     assert(!bridge_runtime_report(BL616_BRIDGE_ROLE_DUALSENSE,report,63,656));
     assert(!bridge_runtime_report(BL616_BRIDGE_ROLE_UNKNOWN,report,64,656));
+    // A button in the wireless page is a temporary connection request, not a
+    // persisted "only this controller" preference. Saving a mapping while a
+    // manual request is pending must keep Auto across reboot.
+    bridge_runtime_set_preference(0); bridge_runtime_set_role(3);
+    assert(bridge_runtime_begin_connection(1,1000));
+    assert(bridge_runtime_preference()==0 && bridge_runtime_effective_preference()==1);
+    assert(bridge_runtime_accepts(1) && !bridge_runtime_accepts(2));
+    assert(bridge_runtime_mapping_command("mapping save ds5",reply,sizeof(reply)));
+    bridge_runtime_init();
+    assert(bridge_runtime_preference()==0 && bridge_runtime_connection_target()==0 && bridge_runtime_role()==3);
+    assert(bridge_runtime_begin_connection(2,2000));
+    assert(bridge_runtime_accepts(2) && !bridge_runtime_accepts(1));
+    assert(!bridge_runtime_connection_tick(61999,false));
+    assert(bridge_runtime_connection_tick(62000,false));
+    assert(bridge_runtime_accepts(1) && bridge_runtime_accepts(2));
+    assert(bridge_runtime_begin_connection(2,0xfffffff0));
+    assert(!bridge_runtime_connection_tick(0xea4f,false)); // 59999 ms across wrap
+    assert(bridge_runtime_connection_tick(0xea50,false));  // 60000 ms across wrap
+    bridge_runtime_set_preference(1);
+    assert(bridge_runtime_begin_connection(2,0));
+    assert(!bridge_runtime_connection_tick(60001,true)); // live session retains its selected input
+    bridge_runtime_clear_connection();
+    assert(bridge_runtime_effective_preference()==1 && bridge_runtime_accepts(1));
+    assert(!bridge_runtime_accepts(2)); // explicit saved restriction remains intact
+    assert(bridge_runtime_begin_connection(2,0));
+    bridge_runtime_set_preference(0);
+    assert(bridge_runtime_connection_target()==0 && bridge_runtime_accepts(1) && bridge_runtime_accepts(2));
+    assert(!bridge_runtime_begin_connection(3,0));
     puts("runtime telemetry, wrap, stale input, preference, cross-role encoding, native mapping and persistence: PASS");
+    puts("manual connection target, saved Auto after mapping save/reboot, timeout/wrap and explicit input selection: PASS");
 }

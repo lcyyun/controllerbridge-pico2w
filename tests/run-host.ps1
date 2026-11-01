@@ -18,4 +18,8 @@ try {
     if($LASTEXITCODE) { throw 'Runtime test compile failed' }
     & "$out/runtime.exe"
     if($LASTEXITCODE) { throw 'Runtime tests failed' }
+    & g++ -std=c++20 -Wall -Wextra -Werror -Isrc -Itests/output_stubs tests/connection_policy.cpp src/bridge_connection_control.cpp src/bridge_runtime.cpp src/profiles/auto_profile.cpp "$out/bl616_bridge_protocol.o" "$out/bl616_bridge_mapping.o" -o "$out/connection-policy.exe"
+    if($LASTEXITCODE) { throw 'Connection policy compile failed' }
+    & "$out/connection-policy.exe"
+    if($LASTEXITCODE) { throw 'Connection policy tests failed' }
 } finally { Pop-Location }
